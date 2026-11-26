@@ -832,17 +832,67 @@ public abstract class HttpMessageDecoder extends ReplayingDecoder<HttpMessageDec
     protected abstract boolean isDecodingRequest();
     protected abstract HttpMessage createMessage(String[] initialLine) throws Exception;
 
+    /**
+     * Parses the chunk size of a chunk start line strictly: the line must start with the hexadecimal chunk
+     * size, which may only be followed by optional bad whitespace (SP / HTAB) and a ';' starting the chunk
+     * extensions. Leading whitespace, whitespace or other tokens after the chunk size and control characters
+     * are rejected instead of being truncated, which would otherwise enable request smuggling.
+     * See CVE-2026-93566 and CVE-2026-93574.
+     */
     private static int getChunkSize(String hex) {
-        hex = hex.trim();
-        for (int i = 0; i < hex.length(); i ++) {
-            char c = hex.charAt(i);
-            if (c == ';' || Character.isWhitespace(c) || Character.isISOControl(c)) {
-                hex = hex.substring(0, i);
-                break;
+        final int length = hex.length();
+        if (length == 0) { // Empty case - not allowed
+            throw new NumberFormatException("Empty chunk size");
+        }
+        long result = 0;
+        for (int i = 0; i < length; i ++) {
+            final int digit = decodeHexNibble(hex.charAt(i));
+            if (digit == -1) {
+                // Uncommon path:
+                // We must either hit the end of the chunk start line (implicit CRLF from the line reader),
+                // or a ';' character for chunk-extensions, or the "bad whitespace" allowed to precede ';'.
+                char c = hex.charAt(i);
+                int j = 0;
+                while (c == HttpConstants.SP || c == HttpConstants.HT) { // Skip BWS
+                    int index = i + (++ j);
+                    if (index >= length) {
+                        throw new NumberFormatException("Invalid chunk size; expected extensions");
+                    }
+                    c = hex.charAt(index);
+                }
+                if (c == ';') {
+                    if (i == 0) { // Empty case - not allowed
+                        throw new NumberFormatException("Empty chunk size");
+                    }
+                    return (int) result;
+                }
+                // non-hex char fail-fast path
+                throw new NumberFormatException("Invalid character in chunk size");
+            }
+            result *= 16;
+            result += digit;
+            if (result > Integer.MAX_VALUE) {
+                throw new NumberFormatException("Chunk size overflow: " + result);
             }
         }
+        return (int) result;
+    }
 
-        return Integer.parseInt(hex, 16);
+    /**
+     * Decodes a single ASCII hexadecimal digit, returning {@code -1} for any other character.
+     * Unlike {@link Character#digit(char, int)} this does not accept non-ASCII digits.
+     */
+    private static int decodeHexNibble(final char c) {
+        if (c >= '0' && c <= '9') {
+            return c - '0';
+        }
+        if (c >= 'a' && c <= 'f') {
+            return c - 'a' + 10;
+        }
+        if (c >= 'A' && c <= 'F') {
+            return c - 'A' + 10;
+        }
+        return -1;
     }
 
     /**

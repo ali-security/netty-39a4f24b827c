@@ -839,7 +839,7 @@ public class HttpMessageDecoderTest {
     @Test
     public void mustParseChunkExtensionsWithoutValueRequest() {
         assertChunkLineAccepted(new HttpRequestDecoder(), CHUNKED_REQUEST_HEAD +
-                " 1 ;ext;\r\n" +
+                "1 ;ext;\r\n" +
                 "Y\r\n" +
                 "0;last\r\n" +
                 "\r\n");
@@ -848,7 +848,7 @@ public class HttpMessageDecoderTest {
     @Test
     public void mustParseChunkExtensionsWithoutValueResponse() {
         assertChunkLineAccepted(new HttpResponseDecoder(), CHUNKED_RESPONSE_HEAD +
-                " 1 ;ext;\r\n" +
+                "1 ;ext;\r\n" +
                 "Y\r\n" +
                 "0;last\r\n" +
                 "\r\n");
@@ -1008,6 +1008,338 @@ public class HttpMessageDecoderTest {
         assertEquals(HttpHeaders.Values.CHUNKED, message.getHeader(HttpHeaders.Names.TRANSFER_ENCODING));
         // The invalid chunk line produced no chunk, and nothing after it (e.g. a smuggled message) was decoded.
         assertNull(embedder.poll());
+    }
+
+    // ---------------------------------------------------------------------
+    // CVE-2026-93566 / CVE-2026-93574: the chunk size must be strictly
+    // validated. Whitespace around the chunk size, extra tokens after it and
+    // control characters inside it used to be silently truncated, so that
+    // "5 c" was read as "5" and the remaining bytes could be smuggled as a
+    // second request or response.
+    // Backport of netty/netty@161f9ad.
+    // ---------------------------------------------------------------------
+
+    @Test
+    public void mustRejectEmptyChunkSizeRequest() {
+        assertChunkSizeRejectedRequest("");
+    }
+
+    @Test
+    public void mustRejectChunkSizeWithTrailingWhitespaceRequest() {
+        assertChunkSizeRejectedRequest("5 ");
+    }
+
+    @Test
+    public void mustRejectChunkSizeWithLeadingWhitespaceRequest() {
+        assertChunkSizeRejectedRequest(" 5");
+    }
+
+    @Test
+    public void mustRejectChunkSizeWithWhitespaceAndHexDigitRequest() {
+        assertChunkSizeRejectedRequest("5 c");
+    }
+
+    @Test
+    public void mustRejectChunkSizeWithWhitespaceAndTokenRequest() {
+        assertChunkSizeRejectedRequest("5 x");
+    }
+
+    @Test
+    public void mustRejectChunkSizeWithWhitespaceAndHexDigitBeforeChunkExtensionsRequest() {
+        assertChunkSizeRejectedRequest("5 c;foo=bar");
+    }
+
+    @Test
+    public void mustRejectChunkSizeWithLeadingWhitespaceAndHexDigitRequest() {
+        assertChunkSizeRejectedRequest("  5 c");
+    }
+
+    @Test
+    public void mustRejectChunkSizeWithLeadingWhitespaceAndTokenRequest() {
+        assertChunkSizeRejectedRequest("  5 x");
+    }
+
+    @Test
+    public void mustRejectChunkSizeWithLeadingWhitespaceAndHexDigitBeforeChunkExtensionsRequest() {
+        assertChunkSizeRejectedRequest("  5 c;foo=bar");
+    }
+
+    @Test
+    public void mustRejectEmptyChunkSizeResponse() {
+        assertChunkSizeRejectedResponse("");
+    }
+
+    @Test
+    public void mustRejectChunkSizeWithTrailingWhitespaceResponse() {
+        assertChunkSizeRejectedResponse("5 ");
+    }
+
+    @Test
+    public void mustRejectChunkSizeWithLeadingWhitespaceResponse() {
+        assertChunkSizeRejectedResponse(" 5");
+    }
+
+    @Test
+    public void mustRejectChunkSizeWithWhitespaceAndHexDigitResponse() {
+        assertChunkSizeRejectedResponse("5 c");
+    }
+
+    @Test
+    public void mustRejectChunkSizeWithWhitespaceAndTokenResponse() {
+        assertChunkSizeRejectedResponse("5 x");
+    }
+
+    @Test
+    public void mustRejectChunkSizeWithWhitespaceAndHexDigitBeforeChunkExtensionsResponse() {
+        assertChunkSizeRejectedResponse("5 c;foo=bar");
+    }
+
+    @Test
+    public void mustRejectChunkSizeWithLeadingWhitespaceAndHexDigitResponse() {
+        assertChunkSizeRejectedResponse("  5 c");
+    }
+
+    @Test
+    public void mustRejectChunkSizeWithLeadingWhitespaceAndTokenResponse() {
+        assertChunkSizeRejectedResponse("  5 x");
+    }
+
+    @Test
+    public void mustRejectChunkSizeWithLeadingWhitespaceAndHexDigitBeforeChunkExtensionsResponse() {
+        assertChunkSizeRejectedResponse("  5 c;foo=bar");
+    }
+
+    @Test
+    public void mustRejectChunkSizeWithLeadingTabRequest() {
+        assertChunkSizeRejectedRequest("\t5");
+    }
+
+    @Test
+    public void mustRejectChunkSizeWithTrailingTabRequest() {
+        assertChunkSizeRejectedRequest("5\t");
+    }
+
+    @Test
+    public void mustRejectChunkSizeWithNulRequest() {
+        assertChunkSizeRejectedRequest("5\u0000");
+    }
+
+    @Test
+    public void mustRejectChunkSizeWithNulAndTokenRequest() {
+        assertChunkSizeRejectedRequest("5\u0000x");
+    }
+
+    @Test
+    public void mustRejectChunkSizeWithLeadingControlCharacterRequest() {
+        assertChunkSizeRejectedRequest("\u00015");
+    }
+
+    @Test
+    public void mustRejectChunkSizeWithVerticalTabRequest() {
+        assertChunkSizeRejectedRequest("5\u000b");
+    }
+
+    @Test
+    public void mustRejectChunkSizeWithFormFeedBeforeChunkExtensionsRequest() {
+        assertChunkSizeRejectedRequest("5\u000c;foo=bar");
+    }
+
+    @Test
+    public void mustRejectChunkSizeWithUnitSeparatorRequest() {
+        assertChunkSizeRejectedRequest("5\u001f");
+    }
+
+    @Test
+    public void mustRejectChunkSizeWithDeleteCharacterRequest() {
+        assertChunkSizeRejectedRequest("5\u007f");
+    }
+
+    @Test
+    public void mustRejectChunkSizeWithBareCarriageReturnRequest() {
+        assertChunkSizeRejectedRequest("5\rX");
+    }
+
+    @Test
+    public void mustRejectChunkSizeWithTrailingBareCarriageReturnRequest() {
+        assertChunkSizeRejectedRequest("5\r");
+    }
+
+    @Test
+    public void mustRejectLastChunkSizeWithBareCarriageReturnRequest() {
+        assertChunkSizeRejectedRequest("0\rX");
+    }
+
+    @Test
+    public void mustRejectChunkSizeWithPlusSignRequest() {
+        assertChunkSizeRejectedRequest("+5");
+    }
+
+    @Test
+    public void mustRejectChunkSizeWithMinusSignRequest() {
+        assertChunkSizeRejectedRequest("-0");
+    }
+
+    @Test
+    public void mustRejectChunkSizeWithHexPrefixRequest() {
+        assertChunkSizeRejectedRequest("0x5");
+    }
+
+    @Test
+    public void mustRejectChunkSizeThatWouldCauseOverflowRequest() {
+        assertChunkSizeRejected(new HttpRequestDecoder(), chunkSizeSmugglingRequest("80000000"),
+                NumberFormatException.class, "Chunk size overflow");
+    }
+
+    @Test
+    public void mustRejectBareCarriageReturnInLastChunkExtensionsRequest() {
+        // The bare CR after the ';' must be rejected by the chunk extension validation, so that the smuggled
+        // request is never decoded.
+        assertChunkSizeRejected(new HttpRequestDecoder(), chunkSizeSmugglingRequest("0;\rX"),
+                IllegalArgumentException.class, "Invalid chunk extension");
+    }
+
+    @Test
+    public void mustRejectChunkSizeWithNulResponse() {
+        assertChunkSizeRejectedResponse("5\u0000");
+    }
+
+    @Test
+    public void mustRejectChunkSizeWithBareCarriageReturnResponse() {
+        assertChunkSizeRejectedResponse("5\rX");
+    }
+
+    @Test
+    public void mustRejectLastChunkSizeWithBareCarriageReturnResponse() {
+        assertChunkSizeRejectedResponse("0\rX");
+    }
+
+    @Test
+    public void mustRejectBareCarriageReturnInLastChunkExtensionsResponse() {
+        assertChunkSizeRejected(new HttpResponseDecoder(), chunkSizeSmugglingResponse("0;\rX"),
+                IllegalArgumentException.class, "Invalid chunk extension");
+    }
+
+    @Test
+    public void mustParseChunkSizeWithChunkExtensionsRequest() {
+        assertChunkSizeAccepted(new HttpRequestDecoder(), CHUNKED_REQUEST_HEAD, "5;foo=bar", "hello");
+    }
+
+    @Test
+    public void mustParseChunkSizeWithWhitespaceBeforeChunkExtensionsRequest() {
+        assertChunkSizeAccepted(new HttpRequestDecoder(), CHUNKED_REQUEST_HEAD, "5 \t;foo=bar", "hello");
+    }
+
+    @Test
+    public void mustParseChunkSizeWithWhitespaceBeforeChunkExtensionsResponse() {
+        assertChunkSizeAccepted(new HttpResponseDecoder(), CHUNKED_RESPONSE_HEAD, "5\t ;foo=bar", "hello");
+    }
+
+    @Test
+    public void mustParseChunkSizeWithLeadingZerosRequest() {
+        assertChunkSizeAccepted(new HttpRequestDecoder(), CHUNKED_REQUEST_HEAD, "00005", "hello");
+    }
+
+    @Test
+    public void mustParseChunkSizeWithLowerAndUpperCaseHexDigitsRequest() {
+        assertChunkSizeAccepted(new HttpRequestDecoder(), CHUNKED_REQUEST_HEAD, "a", "0123456789");
+        assertChunkSizeAccepted(new HttpRequestDecoder(), CHUNKED_REQUEST_HEAD, "A", "0123456789");
+        assertChunkSizeAccepted(new HttpRequestDecoder(), CHUNKED_REQUEST_HEAD, "0F", "0123456789abcde");
+    }
+
+    @Test
+    public void mustParseChunkSizeWithWhitespaceBeforeChunkExtensionsSplitAcrossBuffersRequest() {
+        assertChunkLineAcceptedByteByByte(new HttpRequestDecoder(), CHUNKED_REQUEST_HEAD +
+                "1 \t;foo=bar\r\n" +
+                "Y\r\n" +
+                "0\r\n" +
+                "\r\n");
+    }
+
+    private static String chunkSizeSmugglingRequest(String chunkSizeLine) {
+        return "POST / HTTP/1.1\r\n" +
+                "Host: example\r\n" +
+                "Transfer-Encoding: chunked\r\n" +
+                "\r\n" +
+                chunkSizeLine + "\r\n" +
+                "GPOST\r\n" +
+                "0\r\n" +
+                "\r\n" +
+                "GET /smuggled HTTP/1.1\r\n" +
+                "Host: example\r\n" +
+                "\r\n";
+    }
+
+    private static String chunkSizeSmugglingResponse(String chunkSizeLine) {
+        return "HTTP/1.1 200 OK\r\n" +
+                "Transfer-Encoding: chunked\r\n" +
+                "\r\n" +
+                chunkSizeLine + "\r\n" + // malformed chunk size
+                "GPOST\r\n" +
+                "0\r\n" +
+                "\r\n" +
+                "HTTP/1.1 200 smuggled\r\n" +
+                "Host: example\r\n" +
+                "\r\n";
+    }
+
+    private static void assertChunkSizeRejectedRequest(String chunkSizeLine) {
+        HttpRequest request = (HttpRequest) assertChunkSizeRejected(
+                new HttpRequestDecoder(), chunkSizeSmugglingRequest(chunkSizeLine),
+                NumberFormatException.class, "chunk size");
+        // The request headers parse fine.
+        assertEquals(HttpVersion.HTTP_1_1, request.getProtocolVersion());
+        assertEquals(HttpMethod.POST, request.getMethod());
+    }
+
+    private static void assertChunkSizeRejectedResponse(String chunkSizeLine) {
+        HttpResponse response = (HttpResponse) assertChunkSizeRejected(
+                new HttpResponseDecoder(), chunkSizeSmugglingResponse(chunkSizeLine),
+                NumberFormatException.class, "chunk size");
+        // The response headers parse fine.
+        assertEquals(HttpVersion.HTTP_1_1, response.getProtocolVersion());
+        assertEquals(HttpResponseStatus.OK, response.getStatus());
+    }
+
+    private static HttpMessage assertChunkSizeRejected(HttpMessageDecoder decoder, String messageStr,
+            Class<? extends Exception> expectedCause, String expectedMessage) {
+        DecoderEmbedder<Object> embedder = new DecoderEmbedder<Object>(decoder);
+        try {
+            embedder.offer(ChannelBuffers.copiedBuffer(messageStr, CharsetUtil.ISO_8859_1));
+            fail("Expected CodecEmbedderException");
+        } catch (CodecEmbedderException e) {
+            // The malformed chunk-size line must be rejected, not truncated at the whitespace.
+            Throwable cause = e.getCause();
+            assertEquals(String.valueOf(cause), expectedCause, cause.getClass());
+            assertTrue(cause.getMessage(), cause.getMessage().contains(expectedMessage));
+        }
+
+        HttpMessage message = (HttpMessage) embedder.poll();
+        assertTrue(message.isChunked());
+
+        // Nothing after the failed chunk may be surfaced as a chunk or as a second, smuggled message.
+        assertNull(embedder.poll());
+        try {
+            embedder.finish();
+        } catch (CodecEmbedderException e) {
+            // Closing the connection lets the decoder look at the remaining bytes once more. It is still
+            // positioned at the malformed chunk-size line, so it must fail again instead of decoding it.
+            assertEquals(String.valueOf(e.getCause()), expectedCause, e.getCause().getClass());
+        }
+        assertNull(embedder.poll());
+        return message;
+    }
+
+    private static void assertChunkSizeAccepted(
+            HttpMessageDecoder decoder, String head, String chunkSizeLine, String data) {
+        String messageStr = head + chunkSizeLine + "\r\n" + data + "\r\n" + "0\r\n\r\n";
+        DecoderEmbedder<Object> embedder = new DecoderEmbedder<Object>(decoder);
+        embedder.offer(ChannelBuffers.copiedBuffer(messageStr, CharsetUtil.ISO_8859_1));
+        HttpMessage message = (HttpMessage) embedder.poll();
+        assertTrue(message.isChunked());
+        HttpChunk chunk = (HttpChunk) embedder.poll();
+        assertEquals(data, chunk.getContent().toString(CharsetUtil.US_ASCII));
+        assertTrue(embedder.poll() instanceof HttpChunkTrailer);
+        assertFalse(embedder.finish());
     }
 
     // ---------------------------------------------------------------------
