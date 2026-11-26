@@ -49,6 +49,9 @@ public class SpdySessionHandler extends SimpleChannelUpstreamHandler
     private volatile int localConcurrentStreams  = DEFAULT_MAX_CONCURRENT_STREAMS;
     private volatile int maxConcurrentStreams    = DEFAULT_MAX_CONCURRENT_STREAMS;
 
+    private static final int DEFAULT_MAX_LOCAL_CONCURRENT_STREAMS = 100;
+    private final int maxLocalConcurrentStreams;
+
     private static final int DEFAULT_WINDOW_SIZE = 64 * 1024; // 64 KB default initial window size
     private volatile int initialSendWindowSize    = DEFAULT_WINDOW_SIZE;
     private volatile int initialReceiveWindowSize = DEFAULT_WINDOW_SIZE;
@@ -75,10 +78,19 @@ public class SpdySessionHandler extends SimpleChannelUpstreamHandler
      *                handle the client endpoint of the connection.
      */
     public SpdySessionHandler(int version, boolean server) {
+        this(version, server, DEFAULT_MAX_LOCAL_CONCURRENT_STREAMS);
+    }
+
+    public SpdySessionHandler(int version, boolean server, int maxLocalConcurrentStreams) {
         if (version < SPDY_MIN_VERSION || version > SPDY_MAX_VERSION) {
             throw new IllegalArgumentException(
                     "unsupported version: " + version);
         }
+        if (maxLocalConcurrentStreams <= 0) {
+            throw new IllegalArgumentException(
+                    "maxLocalConcurrentStreams: " + maxLocalConcurrentStreams + " (expected: > 0)");
+        }
+        this.maxLocalConcurrentStreams = maxLocalConcurrentStreams;
         this.server = server;
         flowControl = version >= 3;
     }
@@ -707,6 +719,9 @@ public class SpdySessionHandler extends SimpleChannelUpstreamHandler
         if (spdySession.numActiveStreams() >= maxConcurrentStreams) {
             return false;
         }
+        if (isRemoteInitiatedID(streamId) && numActiveRemoteStreams() >= maxLocalConcurrentStreams) {
+            return false;
+        }
         spdySession.acceptStream(
                 streamId, priority, remoteSideClosed, localSideClosed,
                 initialSendWindowSize, initialReceiveWindowSize);
@@ -714,6 +729,16 @@ public class SpdySessionHandler extends SimpleChannelUpstreamHandler
             lastGoodStreamId = streamId;
         }
         return true;
+    }
+
+    private int numActiveRemoteStreams() {
+        int count = 0;
+        for (Integer streamId : spdySession.getActiveStreamIds()) {
+            if (isRemoteInitiatedID(streamId.intValue())) {
+                count ++;
+            }
+        }
+        return count;
     }
 
     private void halfCloseStream(int streamId, boolean remote, ChannelFuture future) {

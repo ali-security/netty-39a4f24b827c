@@ -36,6 +36,10 @@ final class SpdySession {
         return activeStreams.size();
     }
 
+    Set<Integer> getActiveStreamIds() {
+        return activeStreams.keySet();
+    }
+
     boolean noActiveStreams() {
         return activeStreams.isEmpty();
     }

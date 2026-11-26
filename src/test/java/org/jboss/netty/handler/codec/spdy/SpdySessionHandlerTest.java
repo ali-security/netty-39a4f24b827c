@@ -257,6 +257,69 @@ public class SpdySessionHandlerTest {
         sessionHandler.finish();
     }
 
+    private static void testSpdySessionHandlerMaxConcurrentStreams(
+            SpdySessionHandler handler, boolean server, int maxConcurrentStreams) {
+        DecoderEmbedder<Object> sessionHandler = new DecoderEmbedder<Object>(handler);
+
+        int remoteStreamId = server ? 1 : 2;
+        for (int i = 0; i < maxConcurrentStreams; i++) {
+            SpdySynStreamFrame spdySynStreamFrame = new DefaultSpdySynStreamFrame(remoteStreamId, 0, (byte) 0);
+            spdySynStreamFrame.setUnidirectional(true);
+            sessionHandler.offer(spdySynStreamFrame);
+            assertSame(spdySynStreamFrame, sessionHandler.poll());
+            assertNull(sessionHandler.peek());
+            remoteStreamId += 2;
+        }
+
+        SpdySynStreamFrame refusedFrame = new DefaultSpdySynStreamFrame(remoteStreamId, 0, (byte) 0);
+        refusedFrame.setUnidirectional(true);
+        sessionHandler.offer(refusedFrame);
+        assertRstStream(sessionHandler.poll(), remoteStreamId, SpdyStreamStatus.REFUSED_STREAM);
+        assertNull(sessionHandler.peek());
+
+        sessionHandler.finish();
+    }
+
+    @Test
+    public void testSpdyClientSessionHandlerDefaultMaxConcurrentStreams() {
+        for (int version = SPDY_MIN_VERSION; version <= SPDY_MAX_VERSION; version ++) {
+            testSpdySessionHandlerMaxConcurrentStreams(new SpdySessionHandler(version, false), false, 100);
+        }
+    }
+
+    @Test
+    public void testSpdyServerSessionHandlerDefaultMaxConcurrentStreams() {
+        for (int version = SPDY_MIN_VERSION; version <= SPDY_MAX_VERSION; version ++) {
+            testSpdySessionHandlerMaxConcurrentStreams(new SpdySessionHandler(version, true), true, 100);
+        }
+    }
+
+    @Test
+    public void testSpdyClientSessionHandlerCustomMaxConcurrentStreams() {
+        for (int version = SPDY_MIN_VERSION; version <= SPDY_MAX_VERSION; version ++) {
+            testSpdySessionHandlerMaxConcurrentStreams(new SpdySessionHandler(version, false, 4), false, 4);
+        }
+    }
+
+    @Test
+    public void testSpdyServerSessionHandlerCustomMaxConcurrentStreams() {
+        for (int version = SPDY_MIN_VERSION; version <= SPDY_MAX_VERSION; version ++) {
+            testSpdySessionHandlerMaxConcurrentStreams(new SpdySessionHandler(version, true, 4), true, 4);
+        }
+    }
+
+    @Test
+    public void testSpdySessionHandlerRejectsNonPositiveMaxConcurrentStreams() {
+        for (int maxConcurrentStreams : new int[] { 0, -1 }) {
+            try {
+                new SpdySessionHandler(SPDY_MAX_VERSION, true, maxConcurrentStreams);
+                fail("Expected IllegalArgumentException for " + maxConcurrentStreams);
+            } catch (IllegalArgumentException expected) {
+                assertTrue(expected.getMessage().startsWith("maxLocalConcurrentStreams"));
+            }
+        }
+    }
+
     @Test
     public void testSpdyClientSessionHandler() {
         for (int version = SPDY_MIN_VERSION; version <= SPDY_MAX_VERSION; version ++) {
