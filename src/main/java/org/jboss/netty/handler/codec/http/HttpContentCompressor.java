@@ -77,6 +77,11 @@ public class HttpContentCompressor extends HttpContentEncoder {
      *        at the expense of memory usage.  The default value is {@code 8}
      */
     public HttpContentCompressor(int compressionLevel, int windowBits, int memLevel) {
+        this(compressionLevel, windowBits, memLevel, DEFAULT_MAX_PIPELINE_DEPTH);
+    }
+
+    public HttpContentCompressor(int compressionLevel, int windowBits, int memLevel, int maxPipelineDepth) {
+        super(maxPipelineDepth);
         if (compressionLevel < 0 || compressionLevel > 9) {
             throw new IllegalArgumentException(
                     "compressionLevel: " + compressionLevel + " (expected: 0-9)");

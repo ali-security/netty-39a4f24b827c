@@ -52,6 +52,9 @@ import org.jboss.netty.handler.codec.embedder.EncoderEmbedder;
 public abstract class HttpContentEncoder extends SimpleChannelHandler
                                          implements LifeCycleAwareChannelHandler {
 
+    public static final int DEFAULT_MAX_PIPELINE_DEPTH = 128;
+
+    private final int maxPipelineDepth;
     private final Queue<String> acceptEncodingQueue = new ConcurrentLinkedQueue<String>();
     private volatile EncoderEmbedder<ChannelBuffer> encoder;
 
@@ -59,6 +62,15 @@ public abstract class HttpContentEncoder extends SimpleChannelHandler
      * Creates a new instance.
      */
     protected HttpContentEncoder() {
+        this(DEFAULT_MAX_PIPELINE_DEPTH);
+    }
+
+    protected HttpContentEncoder(int maxPipelineDepth) {
+        if (maxPipelineDepth <= 0) {
+            throw new IllegalArgumentException(
+                    "maxPipelineDepth must be a positive integer: " + maxPipelineDepth);
+        }
+        this.maxPipelineDepth = maxPipelineDepth;
     }
 
     @Override
@@ -68,6 +80,10 @@ public abstract class HttpContentEncoder extends SimpleChannelHandler
         if (!(msg instanceof HttpMessage)) {
             ctx.sendUpstream(e);
             return;
+        }
+
+        if (maxPipelineDepth <= acceptEncodingQueue.size()) {
+            throw new IllegalStateException("maxPipelineDepth exceeded: " + maxPipelineDepth);
         }
 
         HttpMessage m = (HttpMessage) msg;

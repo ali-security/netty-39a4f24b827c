@@ -15,6 +15,8 @@
  */
 package org.jboss.netty.handler.codec.http;
 
+import org.jboss.netty.handler.codec.embedder.CodecEmbedderException;
+import org.jboss.netty.handler.codec.embedder.DecoderEmbedder;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -42,5 +44,20 @@ public class HttpContentCompressorTest {
             String targetEncoding = compressor.getTargetContentEncoding(acceptEncoding);
             Assert.assertEquals(contentEncoding, targetEncoding);
         }
+    }
+
+    @Test
+    public void testPipelineDepthLimited() {
+        DecoderEmbedder<HttpRequest> decoder = new DecoderEmbedder<HttpRequest>(new HttpContentCompressor());
+        for (int i = 0; i < 128; i++) {
+            decoder.offer(new DefaultHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "/"));
+        }
+        try {
+            decoder.offer(new DefaultHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "/"));
+            Assert.fail();
+        } catch (CodecEmbedderException e) {
+            Assert.assertTrue(e.getCause() instanceof IllegalStateException);
+        }
+        Assert.assertEquals(128, decoder.size());
     }
 }
