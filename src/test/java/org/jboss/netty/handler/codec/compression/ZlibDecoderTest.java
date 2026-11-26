@@ -16,6 +16,7 @@
 package org.jboss.netty.handler.codec.compression;
 
 import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
@@ -87,6 +88,30 @@ public class ZlibDecoderTest {
                     cause instanceof CompressionException);
             assertTrue(cause.getMessage().startsWith("Decompression buffer has reached maximum size"));
         }
+    }
+
+    @Test
+    public void testHugeDecompressIsForwardedInPieces() throws Exception {
+        int uncompressedLength = 16 * 1024 * 1024;
+        byte[] compressed = deflate(new byte[uncompressedLength]);
+        DecoderEmbedder<ChannelBuffer> embedder = new DecoderEmbedder<ChannelBuffer>(new ZlibDecoder());
+        embedder.offer(ChannelBuffers.wrappedBuffer(compressed));
+        embedder.finish();
+
+        long total = 0;
+        int pieces = 0;
+        for (;;) {
+            ChannelBuffer piece = embedder.poll();
+            if (piece == null) {
+                break;
+            }
+            assertTrue("piece of " + piece.readableBytes() + " bytes",
+                    piece.readableBytes() < 64 * 1024 + (compressed.length << 1));
+            total += piece.readableBytes();
+            pieces++;
+        }
+        assertEquals(uncompressedLength, total);
+        assertTrue(pieces > 1);
     }
 
     private static byte[] deflate(byte[] bytes) throws IOException {

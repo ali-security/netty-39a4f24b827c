@@ -19,6 +19,7 @@ import org.jboss.netty.buffer.ChannelBuffer;
 import org.jboss.netty.buffer.ChannelBuffers;
 import org.jboss.netty.channel.Channel;
 import org.jboss.netty.channel.ChannelHandlerContext;
+import org.jboss.netty.channel.Channels;
 import org.jboss.netty.handler.codec.oneone.OneToOneDecoder;
 import org.jboss.netty.util.internal.jzlib.JZlib;
 import org.jboss.netty.util.internal.jzlib.ZStream;
@@ -30,6 +31,8 @@ import org.jboss.netty.util.internal.jzlib.ZStream;
  * @apiviz.has org.jboss.netty.handler.codec.compression.ZlibWrapper
  */
 public class ZlibDecoder extends OneToOneDecoder {
+
+    private static final int MAX_FORWARD_BYTES = 64 * 1024;
 
     private final ZStream z = new ZStream();
     private byte[] dictionary;
@@ -193,6 +196,12 @@ public class ZlibDecoder extends OneToOneDecoder {
                         }
                         decompressed.writeBytes(out, 0, z.next_out_index);
                         z.avail_out = out.length;
+                        if (maxAllocation == 0 && decompressed.readableBytes() >= MAX_FORWARD_BYTES) {
+                            Channels.fireMessageReceived(ctx, decompressed);
+                            decompressed = ChannelBuffers.dynamicBuffer(
+                                    compressed.order(), out.length,
+                                    ctx.getChannel().getConfig().getBufferFactory());
+                        }
                     }
                     z.next_out_index = 0;
 

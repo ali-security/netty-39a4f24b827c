@@ -77,6 +77,9 @@ public abstract class HttpContentDecoder extends SimpleChannelUpstreamHandler
 
             boolean hasContent = m.isChunked() || m.getContent().readable();
             if (hasContent && (decoder = newContentDecoder(contentEncoding)) != null) {
+                if (m.isChunked()) {
+                    decoder.getPipeline().addBefore("SINK", "forwarder", new ChunkForwarder(ctx));
+                }
                 // Decode the content and remove or replace the existing headers
                 // so that the message looks like a decoded message.
                 String targetContentEncoding = getTargetContentEncoding(contentEncoding);
@@ -171,6 +174,7 @@ public abstract class HttpContentDecoder extends SimpleChannelUpstreamHandler
     }
 
     private ChannelBuffer decode(ChannelBuffer buf) {
+        DecoderEmbedder<ChannelBuffer> decoder = this.decoder;
         decoder.offer(buf);
         return ChannelBuffers.wrappedBuffer(decoder.pollAll(new ChannelBuffer[decoder.size()]));
     }
@@ -204,5 +208,22 @@ public abstract class HttpContentDecoder extends SimpleChannelUpstreamHandler
 
     public void afterRemove(ChannelHandlerContext ctx) throws Exception {
         finishDecode();
+    }
+
+    private static final class ChunkForwarder extends SimpleChannelUpstreamHandler {
+
+        private final ChannelHandlerContext ctx;
+
+        ChunkForwarder(ChannelHandlerContext ctx) {
+            this.ctx = ctx;
+        }
+
+        @Override
+        public void messageReceived(ChannelHandlerContext embedderCtx, MessageEvent e) {
+            ChannelBuffer content = (ChannelBuffer) e.getMessage();
+            if (content.readable()) {
+                Channels.fireMessageReceived(ctx, new DefaultHttpChunk(content));
+            }
+        }
     }
 }
