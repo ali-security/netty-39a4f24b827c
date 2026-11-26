@@ -22,6 +22,7 @@ import org.jboss.netty.channel.ChannelHandlerContext;
 import org.jboss.netty.channel.ChannelPipeline;
 import org.jboss.netty.handler.codec.frame.TooLongFrameException;
 import org.jboss.netty.handler.codec.replay.ReplayingDecoder;
+import org.jboss.netty.util.internal.SystemPropertyUtil;
 
 import java.util.BitSet;
 import java.util.List;
@@ -136,6 +137,9 @@ public abstract class HttpMessageDecoder extends ReplayingDecoder<HttpMessageDec
     private static final BitSet CHUNK_EXT_VAL_QDTEXT_CHARS = new BitSet(256);
     private static final BitSet CHUNK_EXT_VAL_QUOTED_PAIR_CHARS = new BitSet(256);
 
+    private static final String INVALID_LINE_SEPARATOR =
+            "HTTP start- and header field-lines must be terminated by a CR LF octet pair";
+
     static {
         final String delimiters = "(),/:<=>?@[\\]{}";
 
@@ -165,6 +169,8 @@ public abstract class HttpMessageDecoder extends ReplayingDecoder<HttpMessageDec
     private final int maxHeaderSize;
     private final int maxChunkSize;
     private final boolean allowDuplicateContentLengths;
+    private final boolean strictLineParsing =
+            SystemPropertyUtil.getBoolean("io.netty.handler.codec.http.defaultStrictLineParsing", true);
     private HttpMessage message;
     private ChannelBuffer content;
     private long chunkSize;
@@ -459,18 +465,11 @@ public abstract class HttpMessageDecoder extends ReplayingDecoder<HttpMessageDec
             }
         }
         case READ_CHUNK_DELIMITER: {
-            for (;;) {
-                byte next = buffer.readByte();
-                if (next == HttpConstants.CR) {
-                    if (buffer.readByte() == HttpConstants.LF) {
-                        checkpoint(State.READ_CHUNK_SIZE);
-                        return null;
-                    }
-                } else if (next == HttpConstants.LF) {
-                    checkpoint(State.READ_CHUNK_SIZE);
-                    return null;
-                }
+            if (buffer.readByte() == HttpConstants.CR && buffer.readByte() == HttpConstants.LF) {
+                checkpoint(State.READ_CHUNK_SIZE);
+                return null;
             }
+            throw new IllegalArgumentException("Chunk data sections must be terminated by a CR LF octet pair");
         }
         case READ_CHUNK_FOOTER: {
             HttpChunkTrailer trailer = readTrailingHeaders(buffer);
@@ -810,8 +809,14 @@ public abstract class HttpMessageDecoder extends ReplayingDecoder<HttpMessageDec
                 if (nextByte == HttpConstants.LF) {
                     break loop;
                 }
+                if (strictLineParsing) {
+                    throw new IllegalArgumentException(INVALID_LINE_SEPARATOR);
+                }
                 break;
             case HttpConstants.LF:
+                if (strictLineParsing) {
+                    throw new IllegalArgumentException(INVALID_LINE_SEPARATOR);
+                }
                 break loop;
             }
 
@@ -1017,7 +1022,8 @@ public abstract class HttpMessageDecoder extends ReplayingDecoder<HttpMessageDec
                 // A bare CR: keep it and read the octet following it again as part of the line.
                 buffer.readerIndex(buffer.readerIndex() - 1);
             } else if (nextByte == HttpConstants.LF) {
-                return sb.toString();
+                throw new IllegalArgumentException(
+                        "Line Feed must be preceded by Carriage Return when terminating HTTP chunk header lines");
             }
             if (lineLength >= maxLineLength) {
                 throw new TooLongFrameException(
@@ -1036,7 +1042,7 @@ public abstract class HttpMessageDecoder extends ReplayingDecoder<HttpMessageDec
      * {@code maxInitialLineLength} budget with any leading control characters skipped by
      * {@link #skipControlCharacters(ChannelBuffer)} (see https://github.com/netty/netty/issues/10111).
      */
-    private static String readLine(ChannelBuffer buffer, int maxLineLength, int initialLength)
+    private String readLine(ChannelBuffer buffer, int maxLineLength, int initialLength)
             throws TooLongFrameException {
         StringBuilder sb = new StringBuilder(64);
         int lineLength = initialLength;
@@ -1047,7 +1053,13 @@ public abstract class HttpMessageDecoder extends ReplayingDecoder<HttpMessageDec
                 if (nextByte == HttpConstants.LF) {
                     return sb.toString();
                 }
+                if (strictLineParsing) {
+                    throw new IllegalArgumentException(INVALID_LINE_SEPARATOR);
+                }
             } else if (nextByte == HttpConstants.LF) {
+                if (strictLineParsing) {
+                    throw new IllegalArgumentException(INVALID_LINE_SEPARATOR);
+                }
                 return sb.toString();
             } else {
                 if (lineLength >= maxLineLength) {

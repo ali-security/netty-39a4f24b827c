@@ -1783,4 +1783,236 @@ public class HttpMessageDecoderTest {
             assertTrue(e.getCause() instanceof IllegalArgumentException);
         }
     }
+
+    private static final String STRICT_LINE_PARSING_PROPERTY =
+            "io.netty.handler.codec.http.defaultStrictLineParsing";
+
+    private static final String INVALID_LINE_SEPARATOR =
+            "HTTP start- and header field-lines must be terminated by a CR LF octet pair";
+
+    @Test
+    public void mustRejectImproperlyTerminatedChunkExtensionsRequest() {
+        assertChunkLineRejected(new HttpRequestDecoder(), CHUNKED_REQUEST_HEAD +
+                "2;\n" +
+                "xx\r\n" +
+                "45\r\n" +
+                "0\r\n\r\n" +
+                "GET /two HTTP/1.1\r\n" +
+                "Host: localhost\r\n" +
+                "Transfer-Encoding: chunked\r\n\r\n" +
+                "0\r\n\r\n");
+    }
+
+    @Test
+    public void mustRejectImproperlyTerminatedChunkExtensionsResponse() {
+        assertChunkLineRejected(new HttpResponseDecoder(), CHUNKED_RESPONSE_HEAD +
+                "2;\n" +
+                "xx\r\n" +
+                "1D\r\n" +
+                "0\r\n\r\n" +
+                "HTTP/1.1 200 OK\r\n" +
+                "Transfer-Encoding: chunked\r\n\r\n" +
+                "0\r\n\r\n");
+    }
+
+    @Test
+    public void mustRejectImproperlyTerminatedChunkExtensionsWithoutStrictLineParsing() {
+        assertChunkLineRejected(newNonStrictRequestDecoder(), CHUNKED_REQUEST_HEAD +
+                "2;\n" +
+                "xx\r\n" +
+                "45\r\n" +
+                "0\r\n\r\n" +
+                "GET /two HTTP/1.1\r\n" +
+                "Host: localhost\r\n" +
+                "Transfer-Encoding: chunked\r\n\r\n" +
+                "0\r\n\r\n");
+    }
+
+    @Test
+    public void mustRejectChunkSizeTerminatedByLoneLineFeedRequest() {
+        assertChunkLineRejected(new HttpRequestDecoder(), CHUNKED_REQUEST_HEAD +
+                "2\n" +
+                "xx\r\n" +
+                "0\r\n\r\n");
+    }
+
+    @Test
+    public void mustRejectImproperlyTerminatedChunkBodiesRequest() {
+        assertChunkDelimiterRejected(new HttpRequestDecoder(), CHUNKED_REQUEST_HEAD +
+                "5\r\n" +
+                "AAAAAXX" +
+                "45\r\n" +
+                "0\r\n" +
+                "GET /two HTTP/1.1\r\n" +
+                "Host: localhost\r\n" +
+                "Transfer-Encoding: chunked\r\n\r\n" +
+                "0\r\n\r\n", "AAAAA");
+    }
+
+    @Test
+    public void mustRejectImproperlyTerminatedChunkBodiesResponse() {
+        assertChunkDelimiterRejected(new HttpResponseDecoder(), CHUNKED_RESPONSE_HEAD +
+                "5\r\n" +
+                "AAAAAXX" +
+                "1D\r\n" +
+                "0\r\n" +
+                "HTTP/1.1 200 OK\r\n" +
+                "Transfer-Encoding: chunked\r\n\r\n" +
+                "0\r\n\r\n", "AAAAA");
+    }
+
+    @Test
+    public void mustRejectChunkBodiesTerminatedByLoneLineFeedRequest() {
+        assertChunkDelimiterRejected(new HttpRequestDecoder(), CHUNKED_REQUEST_HEAD +
+                "5\r\n" +
+                "AAAAA\n" +
+                "0\r\n\r\n", "AAAAA");
+    }
+
+    @Test
+    public void testChunkDelimiterSplitAcrossBuffers() {
+        DecoderEmbedder<Object> embedder = new DecoderEmbedder<Object>(new HttpRequestDecoder());
+        embedder.offer(ChannelBuffers.copiedBuffer("POST / HTTP/1.1\r\n" +
+                "Host: localhost\r\n" +
+                "Transfer-Encoding: chunked\r\n\r\n" +
+                "1\r\n" +
+                "a", CharsetUtil.US_ASCII));
+        HttpRequest request = (HttpRequest) embedder.poll();
+        assertTrue(request.isChunked());
+        HttpChunk chunk = (HttpChunk) embedder.poll();
+        assertEquals("a", chunk.getContent().toString(CharsetUtil.US_ASCII));
+        for (String part : new String[] { "\r", "\n", "0\r", "\n\r" }) {
+            embedder.offer(ChannelBuffers.copiedBuffer(part, CharsetUtil.US_ASCII));
+            assertNull(embedder.poll());
+        }
+        embedder.offer(ChannelBuffers.copiedBuffer("\n", CharsetUtil.US_ASCII));
+        assertTrue(embedder.poll() instanceof HttpChunkTrailer);
+        assertNull(embedder.poll());
+        assertFalse(embedder.finish());
+    }
+
+    @Test
+    public void mustRejectLoneLineFeedInInitialLineRequest() {
+        assertLineSeparatorRejected(new HttpRequestDecoder(), "GET /some/path HTTP/1.1\n" +
+                "Host: localhost\r\n\r\n");
+    }
+
+    @Test
+    public void mustRejectBareCarriageReturnInInitialLineRequest() {
+        assertLineSeparatorRejected(new HttpRequestDecoder(), "GET /some/path\rX HTTP/1.1\r\n" +
+                "Host: localhost\r\n\r\n");
+    }
+
+    @Test
+    public void mustRejectLoneLineFeedInHeadersRequest() {
+        assertLineSeparatorRejected(new HttpRequestDecoder(), "POST / HTTP/1.1\r\n" +
+                "Host: localhost\r\n" +
+                "X-Foo: bar\n" +
+                "Transfer-Encoding: chunked\r\n\r\n" +
+                "0\r\n\r\n" +
+                "GET /smuggled HTTP/1.1\r\n" +
+                "Host: localhost\r\n\r\n");
+    }
+
+    @Test
+    public void mustRejectBareCarriageReturnInHeadersRequest() {
+        assertLineSeparatorRejected(new HttpRequestDecoder(), "POST / HTTP/1.1\r\n" +
+                "Host: localhost\r\n" +
+                "Transfer-Encoding: chunk\red\r\n\r\n" +
+                "0\r\n\r\n");
+    }
+
+    @Test
+    public void mustRejectLoneLineFeedInHeadersResponse() {
+        assertLineSeparatorRejected(new HttpResponseDecoder(), "HTTP/1.1 200 OK\r\n" +
+                "X-Foo: bar\n" +
+                "Content-Length: 0\r\n\r\n");
+    }
+
+    @Test
+    public void mustRejectLoneLineFeedInTrailersRequest() {
+        DecoderEmbedder<Object> embedder = new DecoderEmbedder<Object>(new HttpRequestDecoder());
+        try {
+            embedder.offer(ChannelBuffers.copiedBuffer("POST / HTTP/1.1\r\n" +
+                    "Host: localhost\r\n" +
+                    "Transfer-Encoding: chunked\r\n\r\n" +
+                    "1\r\n" +
+                    "a\r\n" +
+                    "0\r\n" +
+                    "X-Trailer: foo\n" +
+                    "\r\n", CharsetUtil.US_ASCII));
+            fail("Expected CodecEmbedderException");
+        } catch (CodecEmbedderException e) {
+            assertEquals(IllegalArgumentException.class, e.getCause().getClass());
+            assertEquals(INVALID_LINE_SEPARATOR, e.getCause().getMessage());
+        }
+        HttpRequest request = (HttpRequest) embedder.poll();
+        assertTrue(request.isChunked());
+        HttpChunk chunk = (HttpChunk) embedder.poll();
+        assertEquals("a", chunk.getContent().toString(CharsetUtil.US_ASCII));
+        assertNull(embedder.poll());
+    }
+
+    @Test
+    public void testLoneLineFeedAcceptedWithoutStrictLineParsing() {
+        DecoderEmbedder<Object> embedder = new DecoderEmbedder<Object>(newNonStrictRequestDecoder());
+        embedder.offer(ChannelBuffers.copiedBuffer("GET /some/path HTTP/1.1\n" +
+                "Host: localhost\n" +
+                "Transfer-Encoding: chunked\n\n" +
+                "1\r\n" +
+                "a\r\n" +
+                "0\r\n" +
+                "X-Trailer: foo\n" +
+                "\n", CharsetUtil.US_ASCII));
+        HttpRequest request = (HttpRequest) embedder.poll();
+        assertEquals("/some/path", request.getUri());
+        assertEquals("localhost", request.getHeader(HttpHeaders.Names.HOST));
+        HttpChunk chunk = (HttpChunk) embedder.poll();
+        assertEquals("a", chunk.getContent().toString(CharsetUtil.US_ASCII));
+        HttpChunkTrailer trailer = (HttpChunkTrailer) embedder.poll();
+        assertEquals("foo", trailer.getHeader("X-Trailer"));
+        assertNull(embedder.poll());
+        assertFalse(embedder.finish());
+    }
+
+    private static HttpRequestDecoder newNonStrictRequestDecoder() {
+        String old = System.setProperty(STRICT_LINE_PARSING_PROPERTY, "false");
+        try {
+            return new HttpRequestDecoder();
+        } finally {
+            if (old == null) {
+                System.clearProperty(STRICT_LINE_PARSING_PROPERTY);
+            } else {
+                System.setProperty(STRICT_LINE_PARSING_PROPERTY, old);
+            }
+        }
+    }
+
+    private static void assertChunkDelimiterRejected(
+            HttpMessageDecoder decoder, String messageStr, String expectedContent) {
+        DecoderEmbedder<Object> embedder = new DecoderEmbedder<Object>(decoder);
+        try {
+            embedder.offer(ChannelBuffers.copiedBuffer(messageStr, CharsetUtil.ISO_8859_1));
+            fail("Expected CodecEmbedderException");
+        } catch (CodecEmbedderException e) {
+            assertEquals(IllegalArgumentException.class, e.getCause().getClass());
+        }
+        HttpMessage message = (HttpMessage) embedder.poll();
+        assertTrue(message.isChunked());
+        HttpChunk chunk = (HttpChunk) embedder.poll();
+        assertEquals(expectedContent, chunk.getContent().toString(CharsetUtil.US_ASCII));
+        assertNull(embedder.poll());
+    }
+
+    private static void assertLineSeparatorRejected(HttpMessageDecoder decoder, String messageStr) {
+        DecoderEmbedder<Object> embedder = new DecoderEmbedder<Object>(decoder);
+        try {
+            embedder.offer(ChannelBuffers.copiedBuffer(messageStr, CharsetUtil.US_ASCII));
+            fail("Expected CodecEmbedderException");
+        } catch (CodecEmbedderException e) {
+            assertEquals(IllegalArgumentException.class, e.getCause().getClass());
+            assertEquals(INVALID_LINE_SEPARATOR, e.getCause().getMessage());
+        }
+        assertNull(embedder.poll());
+    }
 }
