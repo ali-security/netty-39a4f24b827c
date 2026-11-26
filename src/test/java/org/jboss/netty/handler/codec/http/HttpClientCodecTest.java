@@ -97,4 +97,69 @@ public class HttpClientCodecTest {
         }
 
     }
+
+    @Test
+    public void testInformationalResponseKeepsPairsInSync() {
+        HttpClientCodec codec = new HttpClientCodec();
+        DecoderEmbedder<Object> decoder = new DecoderEmbedder<Object>(codec);
+        EncoderEmbedder<ChannelBuffer> encoder = new EncoderEmbedder<ChannelBuffer>(codec);
+
+        encoder.offer(new DefaultHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.HEAD, "/"));
+        decoder.offer(ChannelBuffers.copiedBuffer("HTTP/1.1 102 Processing\r\n" +
+                "Status-URI: Status-URI:http://status.com; 404\r\n" +
+                "\r\n" +
+                "HTTP/1.1 200 OK\r\n" +
+                "Content-Length: 5\r\n" +
+                "\r\n", CharsetUtil.ISO_8859_1));
+
+        HttpResponse res = (HttpResponse) decoder.poll();
+        assertEquals(102, res.getStatus().getCode());
+        assertFalse(res.getContent().readable());
+
+        res = (HttpResponse) decoder.poll();
+        assertEquals(200, res.getStatus().getCode());
+        assertEquals("5", res.getHeader(HttpHeaders.Names.CONTENT_LENGTH));
+        assertFalse(res.getContent().readable());
+        assertNull(decoder.poll());
+
+        encoder.offer(new DefaultHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "/"));
+        decoder.offer(ChannelBuffers.copiedBuffer("HTTP/1.1 200 OK\r\n" +
+                "Content-Length: 8\r\n" +
+                "\r\n" +
+                "12345678", CharsetUtil.ISO_8859_1));
+
+        res = (HttpResponse) decoder.poll();
+        assertEquals(200, res.getStatus().getCode());
+        assertEquals("12345678", res.getContent().toString(CharsetUtil.ISO_8859_1));
+        assertNull(decoder.poll());
+    }
+
+    @Test
+    public void testInformationalFollowedByResponse() {
+        HttpClientCodec codec = new HttpClientCodec();
+        DecoderEmbedder<Object> decoder = new DecoderEmbedder<Object>(codec);
+        EncoderEmbedder<ChannelBuffer> encoder = new EncoderEmbedder<ChannelBuffer>(codec);
+
+        encoder.offer(new DefaultHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "/1"));
+        encoder.offer(new DefaultHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.HEAD, "/2"));
+
+        decoder.offer(ChannelBuffers.copiedBuffer(
+                "HTTP/1.1 103 Early Hints\r\n\r\n" +
+                "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello" +
+                "HTTP/1.1 200 OK\r\n\r\n", CharsetUtil.US_ASCII));
+
+        HttpResponse res = (HttpResponse) decoder.poll();
+        assertEquals(103, res.getStatus().getCode());
+        assertFalse(res.getContent().readable());
+
+        res = (HttpResponse) decoder.poll();
+        assertEquals(200, res.getStatus().getCode());
+        assertEquals("5", res.getHeader(HttpHeaders.Names.CONTENT_LENGTH));
+        assertEquals("hello", res.getContent().toString(CharsetUtil.US_ASCII));
+
+        res = (HttpResponse) decoder.poll();
+        assertEquals(200, res.getStatus().getCode());
+        assertFalse(res.getContent().readable());
+        assertNull(decoder.poll());
+    }
 }

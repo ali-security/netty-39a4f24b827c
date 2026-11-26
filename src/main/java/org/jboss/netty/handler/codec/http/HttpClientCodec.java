@@ -167,9 +167,9 @@ public class HttpClientCodec implements ChannelUpstreamHandler,
         @Override
         protected boolean isContentAlwaysEmpty(HttpMessage msg) {
             final int statusCode = ((HttpResponse) msg).getStatus().getCode();
-            if (statusCode == 100) {
+            if (statusCode >= 100 && statusCode < 200) {
                 // 100-continue response should be excluded from paired comparison.
-                return true;
+                return super.isContentAlwaysEmpty(msg);
             }
 
             // Get the method of the HTTP request that corresponds to the
