@@ -25,6 +25,50 @@ import static org.junit.Assert.*;
 
 public class HttpCodecUtilTest {
 
+    @Test
+    public void isEncodingSafeStartLineTokenRejectsInvalidTokens() {
+        String[] tokens = {
+                "http://localhost/\r\n",
+                "/r\r\n?q=1",
+                "http://localhost/\r\n?q=1",
+                "/r\r\n/?q=1",
+                "http://localhost/\r\n/?q=1",
+                "/r\r\n",
+                "http://localhost/ HTTP/1.1\r\n\r\nPOST /p HTTP/1.1\r\n\r\n",
+                "/r HTTP/1.1\r\n\r\nPOST /p HTTP/1.1\r\n\r\n",
+                "GET ",
+                " GET",
+                "HTTP/ 1.1",
+                "HTTP/\r0.9",
+                "HTTP/\n1.1",
+                "/a\tHTTP/1.0",
+                "/admin\u0000/public",
+                "/a\u000Bb",
+                "/a\fb",
+                "/a\u001Bb",
+                "/a\u007Fb"
+        };
+        for (String token : tokens) {
+            assertFalse(token, isEncodingSafeStartLineToken(token));
+        }
+    }
+
+    @Test
+    public void isEncodingSafeStartLineTokenAcceptsValidTokens() {
+        assertTrue(isEncodingSafeStartLineToken("/path/to/resource?q=1&r=2"));
+        assertTrue(isEncodingSafeStartLineToken("http://localhost/\u00e9"));
+        assertTrue(isEncodingSafeStartLineToken("*"));
+        assertTrue(isEncodingSafeStartLineToken(""));
+    }
+
+    @Test
+    public void isEncodingSafeStartLineTokenRejectsAllControlCharactersSpaceAndDel() {
+        for (char c = 0; c <= 0x20; c ++) {
+            assertFalse("0x" + Integer.toHexString(c), isEncodingSafeStartLineToken("/a" + c + "b"));
+        }
+        assertFalse(isEncodingSafeStartLineToken("/a\u007Fb"));
+    }
+
     @Test(expected = IllegalArgumentException.class)
     public void normalizeAndGetContentLengthEmpty() {
         normalizeAndGetContentLength(Collections.singletonList(""), false, false);

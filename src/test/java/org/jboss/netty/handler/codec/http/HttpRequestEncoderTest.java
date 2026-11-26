@@ -26,6 +26,9 @@ import java.nio.charset.Charset;
 /**
  */
 public class HttpRequestEncoderTest {
+
+    private static final String SMUGGLING_URI =
+            "/s1 HTTP/1.1\r\n\r\nPOST /s2 HTTP/1.1\r\ncontent-length: 11\r\n\r\nHello WorldGET /s1";
     
     @Test
     public void testUriWithoutPath() throws Exception {
@@ -44,5 +47,26 @@ public class HttpRequestEncoderTest {
         encoder.encodeInitialLine(buffer, new DefaultHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "http://localhost/"));
         String req = buffer.toString(Charset.forName("US-ASCII"));
         assertEquals("GET http://localhost/ HTTP/1.1\r\n", req);
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void testConstructorMustNotAllowRequestSmuggling() {
+        new DefaultHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, SMUGGLING_URI);
+    }
+
+    @Test
+    public void testSetUriMustNotAllowRequestSmuggling() throws Exception {
+        HttpRequest request = new DefaultHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "/safe");
+        IllegalArgumentException cause = null;
+        try {
+            request.setUri(SMUGGLING_URI);
+        } catch (IllegalArgumentException e) {
+            cause = e;
+        }
+        assertNotNull(cause);
+        HttpRequestEncoder encoder = new HttpRequestEncoder();
+        ChannelBuffer buffer = ChannelBuffers.buffer(64);
+        encoder.encodeInitialLine(buffer, request);
+        assertEquals("GET /safe HTTP/1.1\r\n", buffer.toString(Charset.forName("US-ASCII")));
     }
 }

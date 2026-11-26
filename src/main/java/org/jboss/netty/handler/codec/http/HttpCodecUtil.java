@@ -109,6 +109,17 @@ final class HttpCodecUtil {
         }
     }
 
+    static boolean isEncodingSafeStartLineToken(CharSequence token) {
+        int length = token.length();
+        for (int i = 0; i < length; i ++) {
+            char c = token.charAt(i);
+            if (c <= ' ' || c == 0x7F) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     static boolean isTransferEncodingChunked(HttpMessage m) {
         List<String> chunked = m.getHeaders(HttpHeaders.Names.TRANSFER_ENCODING);
         if (chunked.isEmpty()) {

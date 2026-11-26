@@ -46,6 +46,11 @@ public class DefaultHttpRequest extends DefaultHttpMessage implements HttpReques
         if (method == null) {
             throw new NullPointerException("method");
         }
+        if (method.getClass() != HttpMethod.class &&
+                !HttpCodecUtil.isEncodingSafeStartLineToken(method.toString())) {
+            throw new IllegalArgumentException(
+                    "The HTTP method name contain illegal characters: " + method);
+        }
         this.method = method;
     }
 
@@ -56,6 +61,9 @@ public class DefaultHttpRequest extends DefaultHttpMessage implements HttpReques
     public void setUri(String uri) {
         if (uri == null) {
             throw new NullPointerException("uri");
+        }
+        if (!HttpCodecUtil.isEncodingSafeStartLineToken(uri)) {
+            throw new IllegalArgumentException("The URI contain illegal characters: " + uri);
         }
         this.uri = uri;
     }
