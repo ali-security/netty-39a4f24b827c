@@ -23,6 +23,8 @@ import org.jboss.netty.util.CharsetUtil;
 
 import org.junit.Test;
 
+import java.util.Arrays;
+
 import static org.junit.Assert.*;
 
 public class HttpMessageDecoderTest {
@@ -628,6 +630,404 @@ public class HttpMessageDecoderTest {
         assertEquals(HttpHeaders.Values.CHUNKED,
                 response.getHeader(HttpHeaders.Names.TRANSFER_ENCODING));
         assertEquals("netty.io", response.getHeader(HttpHeaders.Names.HOST));
+    }
+
+    // ---------------------------------------------------------------------
+    // CVE-2026-33870 (GHSA-pwqr-wmgm-9rr8): chunk extensions must follow the
+    // grammar of RFC 9112 section 7.1, so that line breaks (or other control
+    // characters) hidden in a chunk extension, e.g. inside a quoted-string,
+    // cannot be used to smuggle a request past a front-end proxy.
+    // See https://w4ke.info/2025/10/29/funky-chunks-2.html
+    // Backport of netty/netty@60e53c9 and netty/netty@0841072.
+    // ---------------------------------------------------------------------
+
+    private static final String CHUNKED_REQUEST_HEAD = "GET /one HTTP/1.1\r\n" +
+            "Host: localhost\r\n" +
+            "Transfer-Encoding: chunked\r\n\r\n";
+
+    private static final String CHUNKED_RESPONSE_HEAD = "HTTP/1.1 200 OK\r\n" +
+            "Transfer-Encoding: chunked\r\n\r\n";
+
+    @Test
+    public void mustParseChunkExtensionsWithQuotedStringsRequest() {
+        assertChunkLineAccepted(new HttpRequestDecoder(), CHUNKED_REQUEST_HEAD +
+                "1;a=\" ;\t\"\r\n" + // chunk extension quote end
+                "Y\r\n" +
+                "0\r\n" +
+                "\r\n");
+    }
+
+    @Test
+    public void mustParseChunkExtensionsWithQuotedStringsResponse() {
+        assertChunkLineAccepted(new HttpResponseDecoder(), CHUNKED_RESPONSE_HEAD +
+                "1;a=\" ;\t\"\r\n" +
+                "Y\r\n" +
+                "0\r\n" +
+                "\r\n");
+    }
+
+    @Test
+    public void mustRejectChunkExtensionsWithLineBreaksInQuotedStringsRequest() {
+        assertChunkLineRejected(new HttpRequestDecoder(), CHUNKED_REQUEST_HEAD +
+                "1;a=\"\r\n" + // chunk extension quote start
+                "X\r\n" +
+                "0\r\n\r\n" +
+                "GET /two HTTP/1.1\r\n" +
+                "Host: localhost\r\n" +
+                "Transfer-Encoding: chunked\r\n\r\n" +
+                "\"\r\n" + // chunk extension quote end
+                "Y\r\n" +
+                "0\r\n" +
+                "\r\n");
+    }
+
+    @Test
+    public void mustRejectChunkExtensionsWithLineBreaksInQuotedStringsResponse() {
+        assertChunkLineRejected(new HttpResponseDecoder(), CHUNKED_RESPONSE_HEAD +
+                "1;a=\"\r\n" + // chunk extension quote start
+                "X\r\n" +
+                "0\r\n\r\n" +
+                "HTTP/1.1 200 OK\r\n" +
+                "Transfer-Encoding: chunked\r\n\r\n" +
+                "\"\r\n" + // chunk extension quote end
+                "Y\r\n" +
+                "0\r\n" +
+                "\r\n");
+    }
+
+    @Test
+    public void mustParseChunkExtensionsWithQuotedStringsAndEscapesRequest() {
+        assertChunkLineAccepted(new HttpRequestDecoder(), CHUNKED_REQUEST_HEAD +
+                "1;a=\" \\\";\t\"\r\n" +
+                "Y\r\n" +
+                "0\r\n" +
+                "\r\n");
+    }
+
+    @Test
+    public void mustParseChunkExtensionsWithQuotedStringsAndEscapesResponse() {
+        assertChunkLineAccepted(new HttpResponseDecoder(), CHUNKED_RESPONSE_HEAD +
+                "1;a=\" \\\";\t\"\r\n" +
+                "Y\r\n" +
+                "0\r\n" +
+                "\r\n");
+    }
+
+    @Test
+    public void mustParseMultipleChunkExtensionsWithTokenValuesRequest() {
+        // ';' must end a token value and start a new extension, not be treated as a token character.
+        assertChunkLineAccepted(new HttpRequestDecoder(), CHUNKED_REQUEST_HEAD +
+                "1;name1=val1;name2=val2\r\n" +
+                "Y\r\n" +
+                "0\r\n" +
+                "\r\n");
+    }
+
+    @Test
+    public void mustParseMultipleChunkExtensionsWithTokenValuesResponse() {
+        assertChunkLineAccepted(new HttpResponseDecoder(), CHUNKED_RESPONSE_HEAD +
+                "1;name1=val1;name2=val2\r\n" +
+                "Y\r\n" +
+                "0\r\n" +
+                "\r\n");
+    }
+
+    @Test
+    public void mustRejectChunkExtensionsWithEscapedLineBreakInQuotedStringsRequest() {
+        assertChunkLineRejected(new HttpRequestDecoder(), CHUNKED_REQUEST_HEAD +
+                "1;a=\" \\\n;\t\"\r\n" +
+                "Y\r\n" +
+                "0\r\n" +
+                "\r\n");
+    }
+
+    @Test
+    public void mustRejectChunkExtensionsWithEscapedLineBreakInQuotedStringsResponse() {
+        assertChunkLineRejected(new HttpResponseDecoder(), CHUNKED_RESPONSE_HEAD +
+                "1;a=\" \\\n;\t\"\r\n" +
+                "Y\r\n" +
+                "0\r\n" +
+                "\r\n");
+    }
+
+    @Test
+    public void mustRejectChunkExtensionsWithEscapedCarriageReturnInQuotedStringsRequest() {
+        assertChunkLineRejected(new HttpRequestDecoder(), CHUNKED_REQUEST_HEAD +
+                "1;a=\" \\\r;\t\"\r\n" +
+                "Y\r\n" +
+                "0\r\n" +
+                "\r\n");
+    }
+
+    @Test
+    public void mustRejectChunkExtensionsWithEscapedCarriageReturnInQuotedStringsResponse() {
+        assertChunkLineRejected(new HttpResponseDecoder(), CHUNKED_RESPONSE_HEAD +
+                "1;a=\" \\\r;\t\"\r\n" +
+                "Y\r\n" +
+                "0\r\n" +
+                "\r\n");
+    }
+
+    @Test
+    public void mustRejectChunkExtensionsWithEscapedCarriageReturnSplitAcrossBuffersRequest() {
+        // The bare CR is the last readable byte of a buffer, so the chunk line must be re-read once more
+        // data arrives and still be rejected.
+        assertChunkLineRejectedByteByByte(new HttpRequestDecoder(), CHUNKED_REQUEST_HEAD +
+                "1;a=\" \\\r;\t\"\r\n" +
+                "Y\r\n" +
+                "0\r\n" +
+                "\r\n");
+    }
+
+    @Test
+    public void mustRejectChunkExtensionsWithEscapedCarriageReturnSplitAcrossBuffersResponse() {
+        assertChunkLineRejectedByteByByte(new HttpResponseDecoder(), CHUNKED_RESPONSE_HEAD +
+                "1;a=\" \\\r;\t\"\r\n" +
+                "Y\r\n" +
+                "0\r\n" +
+                "\r\n");
+    }
+
+    @Test
+    public void mustRejectBareCarriageReturnInChunkExtensionsRequest() {
+        assertChunkLineRejected(new HttpRequestDecoder(), CHUNKED_REQUEST_HEAD +
+                "0;\rX\r\n" +
+                "\r\n");
+    }
+
+    @Test
+    public void mustRejectBareCarriageReturnInChunkExtensionsResponse() {
+        assertChunkLineRejected(new HttpResponseDecoder(), CHUNKED_RESPONSE_HEAD +
+                "0;\rX\r\n" +
+                "\r\n");
+    }
+
+    @Test
+    public void mustRejectControlCharacterInChunkExtensionsRequest() {
+        assertChunkLineRejected(new HttpRequestDecoder(), CHUNKED_REQUEST_HEAD +
+                "1;\0a\r\n" +
+                "Y\r\n" +
+                "0\r\n" +
+                "\r\n");
+    }
+
+    @Test
+    public void mustRejectControlCharacterInChunkExtensionsResponse() {
+        assertChunkLineRejected(new HttpResponseDecoder(), CHUNKED_RESPONSE_HEAD +
+                "1;\0a\r\n" +
+                "Y\r\n" +
+                "0\r\n" +
+                "\r\n");
+    }
+
+    @Test
+    public void mustRejectChunkExtensionsWithoutValueRequest() {
+        assertChunkLineRejected(new HttpRequestDecoder(), CHUNKED_REQUEST_HEAD +
+                "1;a=\r\n" +
+                "Y\r\n" +
+                "0\r\n" +
+                "\r\n");
+    }
+
+    @Test
+    public void mustRejectChunkExtensionsWithoutValueResponse() {
+        assertChunkLineRejected(new HttpResponseDecoder(), CHUNKED_RESPONSE_HEAD +
+                "1;a=\r\n" +
+                "Y\r\n" +
+                "0\r\n" +
+                "\r\n");
+    }
+
+    @Test
+    public void mustParseChunkExtensionsWithObsTextInQuotedStringsRequest() {
+        assertChunkLineAccepted(new HttpRequestDecoder(), CHUNKED_REQUEST_HEAD +
+                "1;a=\"é\\ÿ\"\r\n" +
+                "Y\r\n" +
+                "0\r\n" +
+                "\r\n");
+    }
+
+    @Test
+    public void mustParseChunkExtensionsWithObsTextInQuotedStringsResponse() {
+        assertChunkLineAccepted(new HttpResponseDecoder(), CHUNKED_RESPONSE_HEAD +
+                "1;a=\"é\\ÿ\"\r\n" +
+                "Y\r\n" +
+                "0\r\n" +
+                "\r\n");
+    }
+
+    @Test
+    public void mustParseChunkExtensionsWithoutValueRequest() {
+        assertChunkLineAccepted(new HttpRequestDecoder(), CHUNKED_REQUEST_HEAD +
+                " 1 ;ext;\r\n" +
+                "Y\r\n" +
+                "0;last\r\n" +
+                "\r\n");
+    }
+
+    @Test
+    public void mustParseChunkExtensionsWithoutValueResponse() {
+        assertChunkLineAccepted(new HttpResponseDecoder(), CHUNKED_RESPONSE_HEAD +
+                " 1 ;ext;\r\n" +
+                "Y\r\n" +
+                "0;last\r\n" +
+                "\r\n");
+    }
+
+    @Test
+    public void mustParseChunkExtensionsWithQuotedStringsSplitAcrossBuffersRequest() {
+        assertChunkLineAcceptedByteByByte(new HttpRequestDecoder(), CHUNKED_REQUEST_HEAD +
+                "1;a=\" \\\";\t\";b=c\r\n" +
+                "Y\r\n" +
+                "0\r\n" +
+                "\r\n");
+    }
+
+    @Test
+    public void mustParseChunkExtensionsWithQuotedStringsSplitAcrossBuffersResponse() {
+        assertChunkLineAcceptedByteByByte(new HttpResponseDecoder(), CHUNKED_RESPONSE_HEAD +
+                "1;a=\" \\\";\t\";b=c\r\n" +
+                "Y\r\n" +
+                "0\r\n" +
+                "\r\n");
+    }
+
+    @Test
+    public void lineLengthRestrictionMustNotApplyToChunkContentsRequest() {
+        lineLengthRestrictionMustNotApplyToChunkContents(new HttpRequestDecoder(), "POST /one HTTP/1.1\r\n" +
+                "Host: localhost\r\n" +
+                "Transfer-Encoding: chunked\r\n\r\n");
+    }
+
+    @Test
+    public void lineLengthRestrictionMustNotApplyToChunkContentsResponse() {
+        lineLengthRestrictionMustNotApplyToChunkContents(new HttpResponseDecoder(), "HTTP/1.1 200 OK\r\n" +
+                "Host: localhost\r\n" +
+                "Transfer-Encoding: chunked\r\n\r\n");
+    }
+
+    @Test
+    public void mustRejectChunkSizeWithNonHexadecimalCharactersRequest() {
+        assertChunkLineRejected(new HttpRequestDecoder(), "POST /one HTTP/1.1\r\n" +
+                "Host: localhost\r\n" +
+                "Transfer-Encoding: chunked\r\n" +
+                "\r\n" +
+                "test\r\n\r\n" +
+                "\r\n", NumberFormatException.class);
+    }
+
+    @Test
+    public void mustRejectChunkSizeWithNonHexadecimalCharactersResponse() {
+        assertChunkLineRejected(new HttpResponseDecoder(), CHUNKED_RESPONSE_HEAD +
+                "test\r\n\r\n" +
+                "\r\n", NumberFormatException.class);
+    }
+
+    @Test
+    public void mustRejectChunkSizeWithNonHexadecimalCharactersBeforeChunkExtensionsRequest() {
+        assertChunkLineRejected(new HttpRequestDecoder(), CHUNKED_REQUEST_HEAD +
+                "1\0;a=b\r\n" +
+                "Y\r\n" +
+                "0\r\n" +
+                "\r\n", NumberFormatException.class);
+    }
+
+    @Test
+    public void mustRejectChunkSizeWithNonHexadecimalCharactersBeforeChunkExtensionsResponse() {
+        assertChunkLineRejected(new HttpResponseDecoder(), CHUNKED_RESPONSE_HEAD +
+                "1\0;a=b\r\n" +
+                "Y\r\n" +
+                "0\r\n" +
+                "\r\n", NumberFormatException.class);
+    }
+
+    private static void lineLengthRestrictionMustNotApplyToChunkContents(HttpMessageDecoder decoder, String head) {
+        char[] chars = new char[10000];
+        Arrays.fill(chars, 'a');
+        String content = new String(chars);
+        String messageStr = head +
+                Integer.toHexString(chars.length) + "\r\n" +
+                content + "\r\n" +
+                "0\r\n\r\n";
+        DecoderEmbedder<Object> embedder = new DecoderEmbedder<Object>(decoder);
+        embedder.offer(ChannelBuffers.copiedBuffer(messageStr, CharsetUtil.US_ASCII));
+        HttpMessage message = (HttpMessage) embedder.poll();
+        assertTrue(message.isChunked());
+        int contentLength = 0;
+        for (;;) {
+            HttpChunk chunk = (HttpChunk) embedder.poll();
+            assertNotNull(chunk);
+            if (chunk.isLast()) {
+                break;
+            }
+            contentLength += chunk.getContent().readableBytes();
+        }
+        assertEquals(chars.length, contentLength);
+        assertFalse(embedder.finish()); // And there are no other chunks parsed.
+    }
+
+    private static void assertChunkLineAccepted(HttpMessageDecoder decoder, String messageStr) {
+        DecoderEmbedder<Object> embedder = new DecoderEmbedder<Object>(decoder);
+        embedder.offer(ChannelBuffers.copiedBuffer(messageStr, CharsetUtil.ISO_8859_1));
+        assertChunkLineAccepted(embedder);
+    }
+
+    private static void assertChunkLineAcceptedByteByByte(HttpMessageDecoder decoder, String messageStr) {
+        DecoderEmbedder<Object> embedder = new DecoderEmbedder<Object>(decoder);
+        offerByteByByte(embedder, messageStr);
+        assertChunkLineAccepted(embedder);
+    }
+
+    private static void offerByteByByte(DecoderEmbedder<Object> embedder, String messageStr) {
+        ChannelBuffer buffer = ChannelBuffers.copiedBuffer(messageStr, CharsetUtil.ISO_8859_1);
+        while (buffer.readable()) {
+            embedder.offer(ChannelBuffers.wrappedBuffer(new byte[] { buffer.readByte() }));
+        }
+    }
+
+    private static void assertChunkLineAccepted(DecoderEmbedder<Object> embedder) {
+        HttpMessage message = (HttpMessage) embedder.poll();
+        assertTrue(message.isChunked()); // We parse the headers just fine.
+        assertEquals(HttpHeaders.Values.CHUNKED, message.getHeader(HttpHeaders.Names.TRANSFER_ENCODING));
+        HttpChunk chunk = (HttpChunk) embedder.poll(); // And we parse the chunk.
+        assertEquals("Y", chunk.getContent().toString(CharsetUtil.US_ASCII));
+        assertTrue(embedder.poll() instanceof HttpChunkTrailer);
+        assertFalse(embedder.finish()); // And there are no other chunks parsed.
+    }
+
+    private static void assertChunkLineRejected(HttpMessageDecoder decoder, String messageStr) {
+        assertChunkLineRejected(decoder, messageStr, IllegalArgumentException.class);
+    }
+
+    private static void assertChunkLineRejected(
+            HttpMessageDecoder decoder, String messageStr, Class<? extends Exception> expectedCause) {
+        DecoderEmbedder<Object> embedder = new DecoderEmbedder<Object>(decoder);
+        try {
+            embedder.offer(ChannelBuffers.copiedBuffer(messageStr, CharsetUtil.ISO_8859_1));
+            fail("Expected CodecEmbedderException");
+        } catch (CodecEmbedderException e) {
+            assertEquals(expectedCause, e.getCause().getClass());
+        }
+        assertOnlyMessageHeadDecoded(embedder);
+    }
+
+    private static void assertChunkLineRejectedByteByByte(HttpMessageDecoder decoder, String messageStr) {
+        DecoderEmbedder<Object> embedder = new DecoderEmbedder<Object>(decoder);
+        try {
+            offerByteByByte(embedder, messageStr);
+            fail("Expected CodecEmbedderException");
+        } catch (CodecEmbedderException e) {
+            assertEquals(IllegalArgumentException.class, e.getCause().getClass());
+        }
+        assertOnlyMessageHeadDecoded(embedder);
+    }
+
+    private static void assertOnlyMessageHeadDecoded(DecoderEmbedder<Object> embedder) {
+        HttpMessage message = (HttpMessage) embedder.poll();
+        assertTrue(message.isChunked()); // We parse the headers just fine.
+        assertEquals(HttpHeaders.Values.CHUNKED, message.getHeader(HttpHeaders.Names.TRANSFER_ENCODING));
+        // The invalid chunk line produced no chunk, and nothing after it (e.g. a smuggled message) was decoded.
+        assertNull(embedder.poll());
     }
 
     private static void testInvalidHeaders0(String requestStr) {

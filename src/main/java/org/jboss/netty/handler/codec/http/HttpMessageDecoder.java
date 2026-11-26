@@ -23,6 +23,7 @@ import org.jboss.netty.channel.ChannelPipeline;
 import org.jboss.netty.handler.codec.frame.TooLongFrameException;
 import org.jboss.netty.handler.codec.replay.ReplayingDecoder;
 
+import java.util.BitSet;
 import java.util.List;
 
 /**
@@ -99,6 +100,66 @@ import java.util.List;
  * @apiviz.landmark
  */
 public abstract class HttpMessageDecoder extends ReplayingDecoder<HttpMessageDecoder.State> {
+
+    /*
+     * States and octet classes used by checkChunkExtensions(String) to validate the chunk start line, that is
+     * the chunk size and chunk extensions until the CR LF pair. See RFC 9112 section 7.1 and CVE-2026-33870
+     * (GHSA-pwqr-wmgm-9rr8), a request smuggling attack through line breaks hidden in chunk extensions:
+     *
+     *   chunk          = chunk-size [ chunk-ext ] CRLF
+     *                    chunk-data CRLF
+     *   chunk-size     = 1*HEXDIG
+     *   last-chunk     = 1*("0") [ chunk-ext ] CRLF
+     *   chunk-ext      = *( BWS ";" BWS chunk-ext-name
+     *                       [ BWS "=" BWS chunk-ext-val ] )
+     *   chunk-ext-name = token
+     *   chunk-ext-val  = token / quoted-string
+     *   quoted-string  = DQUOTE *( qdtext / quoted-pair ) DQUOTE
+     *   qdtext         = HTAB / SP / %x21 / %x23-5B / %x5D-7E / obs-text
+     *   quoted-pair    = "\" ( HTAB / SP / VCHAR / obs-text )
+     *   obs-text       = %x80-FF
+     *   BWS            = *( SP / HTAB )
+     *   VCHAR          = %x21-7E
+     */
+    private static final int CHUNK_LINE_SIZE = 0;
+    private static final int CHUNK_LINE_EXT_NAME = 1;
+    private static final int CHUNK_LINE_EXT_VAL_START = 2;
+    private static final int CHUNK_LINE_EXT_VAL_QUOTED = 3;
+    private static final int CHUNK_LINE_EXT_VAL_QUOTED_ESCAPE = 4;
+    private static final int CHUNK_LINE_EXT_VAL_QUOTED_END = 5;
+    private static final int CHUNK_LINE_EXT_VAL_TOKEN = 6;
+
+    private static final BitSet CHUNK_SIZE_CHARS = new BitSet(256);
+    private static final BitSet CHUNK_EXT_NAME_CHARS = new BitSet(256);
+    private static final BitSet CHUNK_EXT_VAL_TOKEN_START_CHARS = new BitSet(256);
+    private static final BitSet CHUNK_EXT_VAL_TOKEN_CHARS = new BitSet(256);
+    private static final BitSet CHUNK_EXT_VAL_QDTEXT_CHARS = new BitSet(256);
+    private static final BitSet CHUNK_EXT_VAL_QUOTED_PAIR_CHARS = new BitSet(256);
+
+    static {
+        final String delimiters = "(),/:<=>?@[\\]{}";
+
+        setChunkLineChars(CHUNK_SIZE_CHARS, "0123456789abcdefABCDEF \t", true);
+
+        CHUNK_EXT_NAME_CHARS.set(0x21, 0x7E + 1);
+        setChunkLineChars(CHUNK_EXT_NAME_CHARS, " \t", true);
+        setChunkLineChars(CHUNK_EXT_NAME_CHARS, delimiters, false);
+
+        CHUNK_EXT_VAL_TOKEN_START_CHARS.set(0x21, 0x7E + 1);
+        setChunkLineChars(CHUNK_EXT_VAL_TOKEN_START_CHARS, delimiters + '"', false);
+
+        CHUNK_EXT_VAL_TOKEN_CHARS.set(0x21, 0x7E + 1);
+        setChunkLineChars(CHUNK_EXT_VAL_TOKEN_CHARS, delimiters + ';', false);
+
+        setChunkLineChars(CHUNK_EXT_VAL_QDTEXT_CHARS, "\t !", true);
+        CHUNK_EXT_VAL_QDTEXT_CHARS.set(0x23, 0x5B + 1);
+        CHUNK_EXT_VAL_QDTEXT_CHARS.set(0x5D, 0x7E + 1);
+        CHUNK_EXT_VAL_QDTEXT_CHARS.set(0x80, 0xFF + 1);
+
+        setChunkLineChars(CHUNK_EXT_VAL_QUOTED_PAIR_CHARS, "\t ", true);
+        CHUNK_EXT_VAL_QUOTED_PAIR_CHARS.set(0x21, 0x7E + 1);
+        CHUNK_EXT_VAL_QUOTED_PAIR_CHARS.set(0x80, 0xFF + 1);
+    }
 
     private final int maxInitialLineLength;
     private final int maxHeaderSize;
@@ -338,7 +399,8 @@ public abstract class HttpMessageDecoder extends ReplayingDecoder<HttpMessageDec
          * read chunk, read and ignore the CRLF and repeat until 0
          */
         case READ_CHUNK_SIZE: {
-            String line = readLine(buffer, maxInitialLineLength);
+            String line = readChunkSizeLine(buffer, maxInitialLineLength);
+            checkChunkExtensions(line);
             int chunkSize = getChunkSize(line);
             this.chunkSize = chunkSize;
             if (chunkSize == 0) {
@@ -697,8 +759,134 @@ public abstract class HttpMessageDecoder extends ReplayingDecoder<HttpMessageDec
         return Integer.parseInt(hex, 16);
     }
 
-    private static String readLine(ChannelBuffer buffer, int maxLineLength) throws TooLongFrameException {
-        return readLine(buffer, maxLineLength, 0);
+    /**
+     * Validates the chunk extensions of a chunk start line against the grammar of RFC 9112 section 7.1, so
+     * that a line break, a bare CR or any other control character hidden in a chunk extension (for example
+     * inside a quoted-string) is rejected instead of being interpreted differently than by other HTTP
+     * implementations. See CVE-2026-33870 (GHSA-pwqr-wmgm-9rr8).
+     *
+     * @throws NumberFormatException if the chunk size before the chunk extensions is invalid
+     * @throws IllegalArgumentException if the chunk extensions are invalid
+     */
+    private static void checkChunkExtensions(String line) {
+        if (line.indexOf(';') == -1) {
+            return;
+        }
+        int state = CHUNK_LINE_SIZE;
+        for (int i = 0; i < line.length(); i ++) {
+            // readChunkSizeLine() stores every octet as a (sign-extended) char, so this restores the octet.
+            state = nextChunkLineState(state, line.charAt(i) & 0xFF);
+        }
+        switch (state) {
+        case CHUNK_LINE_EXT_VAL_START:
+        case CHUNK_LINE_EXT_VAL_QUOTED:
+        case CHUNK_LINE_EXT_VAL_QUOTED_ESCAPE:
+            throw new IllegalArgumentException("Invalid chunk extension");
+        }
+    }
+
+    private static int nextChunkLineState(int state, int octet) {
+        switch (state) {
+        case CHUNK_LINE_SIZE:
+            if (CHUNK_SIZE_CHARS.get(octet)) {
+                return CHUNK_LINE_SIZE;
+            }
+            if (octet == ';') {
+                return CHUNK_LINE_EXT_NAME;
+            }
+            throw new NumberFormatException("Invalid chunk size");
+        case CHUNK_LINE_EXT_NAME:
+            if (CHUNK_EXT_NAME_CHARS.get(octet)) {
+                return CHUNK_LINE_EXT_NAME;
+            }
+            if (octet == '=') {
+                return CHUNK_LINE_EXT_VAL_START;
+            }
+            break;
+        case CHUNK_LINE_EXT_VAL_START:
+            if (octet == ' ' || octet == '\t') {
+                return CHUNK_LINE_EXT_VAL_START;
+            }
+            if (octet == '"') {
+                return CHUNK_LINE_EXT_VAL_QUOTED;
+            }
+            if (CHUNK_EXT_VAL_TOKEN_START_CHARS.get(octet)) {
+                return CHUNK_LINE_EXT_VAL_TOKEN;
+            }
+            break;
+        case CHUNK_LINE_EXT_VAL_QUOTED:
+            if (octet == '\\') {
+                return CHUNK_LINE_EXT_VAL_QUOTED_ESCAPE;
+            }
+            if (octet == '"') {
+                return CHUNK_LINE_EXT_VAL_QUOTED_END;
+            }
+            if (CHUNK_EXT_VAL_QDTEXT_CHARS.get(octet)) {
+                return CHUNK_LINE_EXT_VAL_QUOTED;
+            }
+            break;
+        case CHUNK_LINE_EXT_VAL_QUOTED_ESCAPE:
+            if (CHUNK_EXT_VAL_QUOTED_PAIR_CHARS.get(octet)) {
+                return CHUNK_LINE_EXT_VAL_QUOTED;
+            }
+            break;
+        case CHUNK_LINE_EXT_VAL_QUOTED_END:
+            if (octet == ' ' || octet == '\t') {
+                return CHUNK_LINE_EXT_VAL_QUOTED_END;
+            }
+            if (octet == ';') {
+                return CHUNK_LINE_EXT_NAME;
+            }
+            break;
+        case CHUNK_LINE_EXT_VAL_TOKEN:
+            if (CHUNK_EXT_VAL_TOKEN_CHARS.get(octet)) {
+                return CHUNK_LINE_EXT_VAL_TOKEN;
+            }
+            if (octet == ';') {
+                return CHUNK_LINE_EXT_NAME;
+            }
+            break;
+        default:
+            throw new Error("Shouldn't reach here.");
+        }
+        throw new IllegalArgumentException("Invalid chunk extension");
+    }
+
+    private static void setChunkLineChars(BitSet set, String chars, boolean value) {
+        for (int i = 0; i < chars.length(); i ++) {
+            set.set(chars.charAt(i), value);
+        }
+    }
+
+    /**
+     * Reads the chunk start line (the chunk size and chunk extensions). Unlike
+     * {@link #readLine(ChannelBuffer, int, int)}, a CR which is not followed by a LF is kept in the
+     * returned line, together with the octet following it, so that {@link #checkChunkExtensions(String)}
+     * rejects it instead of both octets being silently dropped.
+     */
+    private static String readChunkSizeLine(ChannelBuffer buffer, int maxLineLength)
+            throws TooLongFrameException {
+        StringBuilder sb = new StringBuilder(64);
+        int lineLength = 0;
+        while (true) {
+            byte nextByte = buffer.readByte();
+            if (nextByte == HttpConstants.CR) {
+                if (buffer.readByte() == HttpConstants.LF) {
+                    return sb.toString();
+                }
+                // A bare CR: keep it and read the octet following it again as part of the line.
+                buffer.readerIndex(buffer.readerIndex() - 1);
+            } else if (nextByte == HttpConstants.LF) {
+                return sb.toString();
+            }
+            if (lineLength >= maxLineLength) {
+                throw new TooLongFrameException(
+                        "An HTTP line is larger than " + maxLineLength +
+                        " bytes.");
+            }
+            lineLength ++;
+            sb.append((char) nextByte);
+        }
     }
 
     /**
