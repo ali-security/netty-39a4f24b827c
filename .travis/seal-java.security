@@ -1,0 +1,5 @@
+# Sealed build: appended to the JDK's java.security via -Djava.security.properties.
+# The securechat example keystore (used by the *SocketSslEchoTest tests) holds a
+# 512-bit RSA certificate; JDK 7u352 rejects RSA keySize < 1024 by default.
+jdk.certpath.disabledAlgorithms=MD2
+jdk.tls.disabledAlgorithms=SSLv3, RC4, NULL
