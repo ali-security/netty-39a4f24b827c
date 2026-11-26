@@ -622,14 +622,35 @@ public abstract class HttpMessageDecoder extends ReplayingDecoder<HttpMessageDec
         }
 
         if (isContentAlwaysEmpty(message)) {
-            nextState = State.SKIP_CONTROL_CHARS;
-        } else if (message.isChunked()) {
-            // HttpMessage.isChunked() returns true when either:
-            // 1) HttpMessage.setChunked(true) was called or
-            // 2) 'Transfer-Encoding' is 'chunked'.
-            // Because this decoder did not call HttpMessage.setChunked(true)
-            // yet, HttpMessage.isChunked() should return true only when
-            // 'Transfer-Encoding' is 'chunked'.
+            return State.SKIP_CONTROL_CHARS;
+        }
+
+        List<String> transferEncodingFields = message.getHeaders(HttpHeaders.Names.TRANSFER_ENCODING);
+        boolean hasTransferEncoding = !transferEncodingFields.isEmpty();
+        if (hasTransferEncoding && !HttpVersion.HTTP_1_1.equals(message.getProtocolVersion())) {
+            // The Transfer-Encoding header is not permitted at all with HTTP protocols older than 1.1,
+            // and such requests must be rejected.
+            // See https://www.rfc-editor.org/rfc/rfc9112.html#section-6.1
+            throw new IllegalArgumentException("The Transfer-Encoding header is only allowed in HTTP/1.1 or newer");
+        }
+        // The 'chunked' transfer coding may appear anywhere in a comma-separated
+        // Transfer-Encoding field list, so it must be looked up per coding rather than
+        // by comparing whole field values.
+        boolean isTransferEncodingChunked = containsChunkedTransferCoding(transferEncodingFields);
+        // Unlike responses, requests without a final chunked coding cannot use connection close for framing.
+        // See https://datatracker.ietf.org/doc/html/rfc9112#section-6.3-4
+        if (hasTransferEncoding && !isTransferEncodingChunked && isDecodingRequest()) {
+            throw new IllegalArgumentException("The final transfer coding must be chunked for HTTP requests");
+        }
+        if (isTransferEncodingChunked) {
+            // The "chunked must be the last encoding" rule (RFC 9112 6.1) is not specific to
+            // HTTP/1.1 -- it applies to any message that carries a Transfer-Encoding header at
+            // all, so this validation must not be gated on the protocol version.
+            // See https://datatracker.ietf.org/doc/html/rfc9112#name-message-body-length
+            if (!isLastTransferEncodingChunked(transferEncodingFields)) {
+                throw new IllegalArgumentException(
+                        "chunked must be the last encoding present in the Transfer-Encoding header");
+            }
             if (contentLengthValuesCount > 0 && HttpVersion.HTTP_1_1.equals(message.getProtocolVersion())) {
                 handleTransferEncodingChunkedWithContentLength(message);
             }
@@ -642,29 +663,94 @@ public abstract class HttpMessageDecoder extends ReplayingDecoder<HttpMessageDec
         return nextState;
     }
 
+    private static boolean containsChunkedTransferCoding(List<String> transferEncodingFields) {
+        for (int i = 0; i < transferEncodingFields.size(); ++i) {
+            String value = transferEncodingFields.get(i);
+            int start = 0;
+            for (;;) {
+                int comma = value.indexOf(',', start);
+                int end = comma == -1 ? value.length() : comma;
+                if (value.substring(start, end).trim().equalsIgnoreCase(HttpHeaders.Values.CHUNKED)) {
+                    return true;
+                }
+                if (comma == -1) {
+                    break;
+                }
+                start = comma + 1;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isLastTransferEncodingChunked(List<String> transferEncodingFields) {
+        boolean chunkedSeen = false;
+        boolean lastChunked = false;
+        int chunkedLength = HttpHeaders.Values.CHUNKED.length();
+        for (int i = 0; i < transferEncodingFields.size(); ++i) {
+            String value = transferEncodingFields.get(i);
+            int start = 0;
+            while (start <= value.length()) {
+                int comma = value.indexOf(',', start);
+                int end = comma == -1 ? value.length() : comma;
+                while (start < end && (value.charAt(start) == ' ' || value.charAt(start) == '\t')) {
+                    ++start;
+                }
+                while (end > start && (value.charAt(end - 1) == ' ' || value.charAt(end - 1) == '\t')) {
+                    --end;
+                }
+                if (start < end) {
+                    lastChunked = end - start == chunkedLength &&
+                            HttpHeaders.Values.CHUNKED.regionMatches(true, 0, value, start, chunkedLength);
+                    if (lastChunked) {
+                        if (chunkedSeen) {
+                            throw new IllegalArgumentException(
+                                    "chunked transfer coding must not be applied more than once");
+                        }
+                        chunkedSeen = true;
+                    }
+                }
+                if (comma == -1) {
+                    break;
+                }
+                start = comma + 1;
+            }
+        }
+        return lastChunked;
+    }
+
     /**
      * Invoked when a message with both a "Transfer-Encoding: chunked" and a "Content-Length" header field is detected.
-     * The default behavior is to <i>remove</i> the Content-Length field, but this method could be overridden
-     * to change the behavior (to, e.g., throw an exception and produce an invalid message).
+     * The default behavior is to reject the message by throwing an {@link IllegalArgumentException}, but this method
+     * could be overridden to change the behavior (to, e.g., remove the {@code Content-Length} header value).
      * <p>
-     * See: https://tools.ietf.org/html/rfc7230#section-3.3.3
+     * See: <a href="https://www.rfc-editor.org/rfc/rfc9112.html#section-6.1-15">RFC 9112, Section 6.1-15</a>.
      * <pre>
-     *     If a message is received with both a Transfer-Encoding and a
-     *     Content-Length header field, the Transfer-Encoding overrides the
-     *     Content-Length.  Such a message might indicate an attempt to
-     *     perform request smuggling (Section 9.5) or response splitting
-     *     (Section 9.4) and ought to be handled as an error.  A sender MUST
-     *     remove the received Content-Length field prior to forwarding such
-     *     a message downstream.
+     *     A server MAY reject a request that contains both Content-Length and Transfer-Encoding
+     *     or process such a request in accordance with the Transfer-Encoding alone.
+     *     Regardless, the server MUST close the connection after responding to such a request
+     *     to avoid the potential attacks.
      * </pre>
-     * Also see:
-     * https://github.com/apache/tomcat/blob/b693d7c1981fa7f51e58bc8c8e72e3fe80b7b773/
-     * java/org/apache/coyote/http11/Http11Processor.java#L747-L755
-     * https://github.com/nginx/nginx/blob/0ad4393e30c119d250415cb769e3d8bc8dce5186/
-     * src/http/ngx_http_request.c#L1946-L1953
+     * Since Netty itself cannot track the request/response pairing, it cannot guarantee that the connection is closed
+     * immediately after the response is sent. As such, it is safer to immediately reject the request.
+     * <p>
+     * <strong>Note:</strong> RFC 7230 (the previous HTTP/1.1 RFC) allowed the {@code Content-Length} header to simply
+     * be ignored, in the presence of a {@code Transfer-Encoding} header, but this practice is now obsolete
+     * and considered unsafe.
+     * The RFC 7230 behavior can be restored for a specific decoder by overriding this method with an
+     * implementation like the following:
+     * <pre>
+     * &#64;Override
+     * protected void handleTransferEncodingChunkedWithContentLength(HttpMessage message) {
+     *     message.removeHeader(HttpHeaders.Names.CONTENT_LENGTH);
+     * }
+     * </pre>
+     * <p>
+     * <strong>Note:</strong> This method is only called for {@code HTTP/1.1} messages. Earlier HTTP protocol versions
+     * do not support the {@code Transfer-Encoding} header, and will reject messages that include it.
      */
     protected void handleTransferEncodingChunkedWithContentLength(HttpMessage message) {
-        message.removeHeader(HttpHeaders.Names.CONTENT_LENGTH);
+        throw new IllegalArgumentException(
+                "Content-Length are not allowed in HTTP/1.1 messages that contains a Transfer-Encoding header.");
     }
 
     private HttpChunkTrailer readTrailingHeaders(ChannelBuffer buffer) throws TooLongFrameException {

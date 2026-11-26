@@ -17,6 +17,7 @@ package org.jboss.netty.handler.codec.http;
 
 import org.jboss.netty.buffer.ChannelBuffer;
 import org.jboss.netty.buffer.ChannelBuffers;
+import org.jboss.netty.handler.codec.embedder.CodecEmbedderException;
 import org.jboss.netty.handler.codec.embedder.DecoderEmbedder;
 import org.jboss.netty.util.CharsetUtil;
 import org.junit.Assert;
@@ -56,6 +57,44 @@ public class HttpServerCodecTest {
         }
 
         Assert.assertEquals(offeredContentLength, totalBytesPolled);
+    }
+
+    @Test
+    public void testRequestWithBothTransferEncodingAndContentLengthRejected() {
+        // We reject these requests by default (CVE-2026-42581).
+        DecoderEmbedder<Object> decoderEmbedder = new DecoderEmbedder<Object>(new HttpServerCodec());
+
+        String requestStr = "POST / HTTP/1.1\r\n" +
+                "Host: example.com\r\n" +
+                "Content-Length: 5\r\n" +
+                "Transfer-Encoding: chunked\r\n\r\n" +
+                "0\r\n\r\n";
+
+        try {
+            decoderEmbedder.offer(ChannelBuffers.copiedBuffer(requestStr, CharsetUtil.US_ASCII));
+            Assert.fail("Expected CodecEmbedderException");
+        } catch (CodecEmbedderException e) {
+            Assert.assertTrue(e.getCause() instanceof IllegalArgumentException);
+        }
+        Assert.assertNull(decoderEmbedder.poll());
+    }
+
+    @Test
+    public void testHttp10RequestWithTransferEncodingRejected() {
+        DecoderEmbedder<Object> decoderEmbedder = new DecoderEmbedder<Object>(new HttpServerCodec());
+
+        String requestStr = "POST / HTTP/1.0\r\n" +
+                "Host: example.com\r\n" +
+                "Transfer-Encoding: chunked\r\n\r\n" +
+                "0\r\n\r\n";
+
+        try {
+            decoderEmbedder.offer(ChannelBuffers.copiedBuffer(requestStr, CharsetUtil.US_ASCII));
+            Assert.fail("Expected CodecEmbedderException");
+        } catch (CodecEmbedderException e) {
+            Assert.assertTrue(e.getCause() instanceof IllegalArgumentException);
+        }
+        Assert.assertNull(decoderEmbedder.poll());
     }
 
     private static ChannelBuffer prepareDataChunk(int size) {

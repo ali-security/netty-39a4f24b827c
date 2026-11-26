@@ -160,14 +160,7 @@ public class HttpMessageDecoderTest {
                 "Content-Length: 5\r\n" +
                 "Transfer-Encoding: chunked\r\n\r\n" +
                 "0\r\n\r\n";
-        DecoderEmbedder<Object> embedder = new DecoderEmbedder<Object>(new HttpRequestDecoder());
-        embedder.offer(ChannelBuffers.copiedBuffer(requestStr, CharsetUtil.US_ASCII));
-        HttpRequest request = (HttpRequest) embedder.poll();
-        assertTrue(request.isChunked());
-        assertEquals(HttpHeaders.Values.CHUNKED, request.getHeader(HttpHeaders.Names.TRANSFER_ENCODING));
-        assertFalse(request.containsHeader(HttpHeaders.Names.CONTENT_LENGTH));
-        assertTrue(embedder.poll() instanceof HttpChunkTrailer);
-        assertFalse(embedder.finish());
+        assertContentLengthNotAllowed(new HttpRequestDecoder(), requestStr);
     }
 
     @Test
@@ -176,14 +169,7 @@ public class HttpMessageDecoderTest {
                 "Content-Length: 5\r\n" +
                 "Transfer-Encoding: chunked\r\n\r\n" +
                 "0\r\n\r\n";
-        DecoderEmbedder<Object> embedder = new DecoderEmbedder<Object>(new HttpResponseDecoder());
-        embedder.offer(ChannelBuffers.copiedBuffer(responseStr, CharsetUtil.US_ASCII));
-        HttpResponse response = (HttpResponse) embedder.poll();
-        assertTrue(response.isChunked());
-        assertEquals(HttpHeaders.Values.CHUNKED, response.getHeader(HttpHeaders.Names.TRANSFER_ENCODING));
-        assertFalse(response.containsHeader(HttpHeaders.Names.CONTENT_LENGTH));
-        assertTrue(embedder.poll() instanceof HttpChunkTrailer);
-        assertFalse(embedder.finish());
+        assertContentLengthNotAllowed(new HttpResponseDecoder(), responseStr);
     }
 
     @Test
@@ -342,13 +328,7 @@ public class HttpMessageDecoderTest {
                 "Content-Length: 5, 5\r\n" +
                 "Transfer-Encoding: chunked\r\n\r\n" +
                 "0\r\n\r\n";
-        DecoderEmbedder<Object> embedder = new DecoderEmbedder<Object>(newAllowDuplicateContentLengthsDecoder());
-        embedder.offer(ChannelBuffers.copiedBuffer(requestStr, CharsetUtil.US_ASCII));
-        HttpRequest request = (HttpRequest) embedder.poll();
-        assertTrue(request.isChunked());
-        assertFalse(request.containsHeader(HttpHeaders.Names.CONTENT_LENGTH));
-        assertTrue(embedder.poll() instanceof HttpChunkTrailer);
-        assertFalse(embedder.finish());
+        assertContentLengthNotAllowed(newAllowDuplicateContentLengthsDecoder(), requestStr);
     }
 
     @Test
@@ -1027,6 +1007,414 @@ public class HttpMessageDecoderTest {
         assertTrue(message.isChunked()); // We parse the headers just fine.
         assertEquals(HttpHeaders.Values.CHUNKED, message.getHeader(HttpHeaders.Names.TRANSFER_ENCODING));
         // The invalid chunk line produced no chunk, and nothing after it (e.g. a smuggled message) was decoded.
+        assertNull(embedder.poll());
+    }
+
+    // ---------------------------------------------------------------------
+    // CVE-2026-42585: Transfer-Encoding framing must follow RFC 9112. A
+    // request whose final transfer coding is not 'chunked' must be rejected,
+    // 'chunked' must be the last coding and must not be applied more than
+    // once, and a 'chunked' coding inside a comma-separated list must be
+    // honoured for framing.
+    // See https://datatracker.ietf.org/doc/html/rfc9112#name-message-body-length
+    // ---------------------------------------------------------------------
+
+    @Test
+    public void testInvalidTransferEncodingFramingChunkedIdentity() {
+        testInvalidTransferEncodingFraming("Transfer-Encoding: chunked, identity\r\nContent-Length: 1\r\n");
+    }
+
+    @Test
+    public void testInvalidTransferEncodingFramingChunkedThenGzipField() {
+        testInvalidTransferEncodingFraming("Transfer-Encoding: chunked\r\nTransfer-Encoding: gzip\r\n");
+    }
+
+    @Test
+    public void testInvalidTransferEncodingFramingChunkedGzipTrailingComma() {
+        testInvalidTransferEncodingFraming("Transfer-Encoding: chunked, gzip,\r\n");
+    }
+
+    @Test
+    public void testInvalidTransferEncodingFramingChunkedXchunked() {
+        testInvalidTransferEncodingFraming("Transfer-Encoding: chunked, xchunked\r\n");
+    }
+
+    @Test
+    public void testInvalidTransferEncodingFramingGzipOnly() {
+        testInvalidTransferEncodingFraming("Transfer-Encoding: gzip\r\n");
+    }
+
+    @Test
+    public void testInvalidTransferEncodingFramingSpaceSeparated() {
+        testInvalidTransferEncodingFraming("Transfer-Encoding: chunked gzip\r\nContent-Length: 1\r\n");
+    }
+
+    @Test
+    public void testInvalidTransferEncodingFramingChunkedTwice() {
+        testInvalidTransferEncodingFraming("Transfer-Encoding: chunked, chunked\r\n");
+    }
+
+    @Test
+    public void testInvalidTransferEncodingFramingChunkedGzipChunked() {
+        testInvalidTransferEncodingFraming("Transfer-Encoding: chunked, gzip, chunked\r\n");
+    }
+
+    @Test
+    public void testInvalidTransferEncodingFramingChunkedTwiceInSeparateFields() {
+        testInvalidTransferEncodingFraming("Transfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n");
+    }
+
+    @Test
+    public void testInvalidTransferEncodingFramingChunkedTwiceMixedCase() {
+        testInvalidTransferEncodingFraming("Transfer-Encoding: Chunked, , CHUNKED,\r\n");
+    }
+
+    @Test
+    public void testInvalidTransferEncodingFramingChunkedWithParameter() {
+        testInvalidTransferEncodingFraming("Transfer-Encoding: chunked;foo=bar\r\n");
+    }
+
+    private static void testInvalidTransferEncodingFraming(String headers) {
+        testInvalidHeaders0("GET /some/path HTTP/1.1\r\n" + headers + "Host: netty.io\r\n\r\n");
+    }
+
+    @Test
+    public void testChunkedLastInMultiLineTransferEncoding() {
+        testChunkedLastInMultiLineTransferEncoding(
+                "Transfer-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n");
+    }
+
+    @Test
+    public void testChunkedLastInMultiLineTransferEncodingTrailingComma() {
+        testChunkedLastInMultiLineTransferEncoding(
+                "Transfer-Encoding: gzip\r\nTransfer-Encoding: chunked,\r\n");
+    }
+
+    @Test
+    public void testChunkedLastInMultiLineTransferEncodingEmptyCodings() {
+        testChunkedLastInMultiLineTransferEncoding(
+                "Transfer-Encoding: chunked\r\nTransfer-Encoding: , \t,\r\n");
+    }
+
+    private static void testChunkedLastInMultiLineTransferEncoding(String transferEncodingHeaders) {
+        String requestStr = "GET /some/path HTTP/1.1\r\n" +
+                transferEncodingHeaders +
+                "Host: netty.io\r\n\r\n" +
+                "0\r\n\r\n";
+        DecoderEmbedder<Object> embedder = new DecoderEmbedder<Object>(new HttpRequestDecoder());
+        embedder.offer(ChannelBuffers.copiedBuffer(requestStr, CharsetUtil.US_ASCII));
+
+        Object msg = embedder.poll();
+        assertTrue(msg instanceof HttpRequest);
+        HttpRequest request = (HttpRequest) msg;
+        assertTrue(request.isChunked());
+        assertEquals(2, request.getHeaders(HttpHeaders.Names.TRANSFER_ENCODING).size());
+        assertTrue(embedder.poll() instanceof HttpChunkTrailer);
+        assertFalse(embedder.finish());
+    }
+
+    // A 'chunked' coding that is not the last one must never be used for framing, whatever the
+    // protocol version. For HTTP/1.0 the message is now rejected even earlier, because the
+    // Transfer-Encoding header is not allowed at all before HTTP/1.1 (CVE-2026-42581).
+    @Test
+    public void testChunkedNotLastInTransferEncodingHttp10() {
+        String requestStr = "GET /some/path HTTP/1.0\r\n" +
+                "Transfer-Encoding: chunked, identity\r\n" +
+                "Content-Length: 1\r\n" +
+                "Host: netty.io\r\n\r\n" +
+                "a";
+        testInvalidHeaders0(requestStr);
+    }
+
+    // Companion to the test above: confirms the fix isn't tied to identity being a no-op
+    // by using a real trailing encoding (gzip) instead.
+    @Test
+    public void testChunkedNotLastInTransferEncodingHttp10NonNoOpEncoding() {
+        String requestStr = "GET /some/path HTTP/1.0\r\n" +
+                "Transfer-Encoding: chunked, gzip\r\n" +
+                "Content-Length: 1\r\n" +
+                "Host: netty.io\r\n\r\n" +
+                "a";
+        testInvalidHeaders0(requestStr);
+    }
+
+    // A final 'chunked' coding inside a comma-separated list must frame the body as chunked.
+    @Test
+    public void testChunkedLastInCommaSeparatedTransferEncoding() {
+        String requestStr = "POST /some/path HTTP/1.1\r\n" +
+                "Transfer-Encoding: gzip, chunked\r\n" +
+                "Host: netty.io\r\n\r\n" +
+                "0\r\n\r\n";
+        DecoderEmbedder<Object> embedder = new DecoderEmbedder<Object>(new HttpRequestDecoder());
+        embedder.offer(ChannelBuffers.copiedBuffer(requestStr, CharsetUtil.US_ASCII));
+
+        Object msg = embedder.poll();
+        assertTrue(msg instanceof HttpRequest);
+        HttpRequest request = (HttpRequest) msg;
+        assertTrue(request.isChunked());
+        assertTrue(embedder.poll() instanceof HttpChunkTrailer);
+        assertFalse(embedder.finish());
+    }
+
+    // ... and must never fall back to the Content-Length framing: since CVE-2026-42581 a
+    // Content-Length next to the Transfer-Encoding header gets the message rejected.
+    @Test
+    public void testChunkedLastInCommaSeparatedTransferEncodingWithContentLength() {
+        String requestStr = "POST /some/path HTTP/1.1\r\n" +
+                "Transfer-Encoding: gzip, chunked\r\n" +
+                "Content-Length: 5\r\n" +
+                "Host: netty.io\r\n\r\n" +
+                "0\r\n\r\n";
+        assertContentLengthNotAllowed(new HttpRequestDecoder(), requestStr);
+    }
+
+    @Test
+    public void testResponseChunkedNotLastInTransferEncoding() {
+        String responseStr = "HTTP/1.1 200 OK\r\n" +
+                "Transfer-Encoding: chunked, gzip\r\n\r\n";
+        testInvalidHeaders0(new HttpResponseDecoder(), responseStr);
+    }
+
+    @Test
+    public void testResponseChunkedLastInCommaSeparatedTransferEncoding() {
+        String responseStr = "HTTP/1.1 200 OK\r\n" +
+                "Transfer-Encoding: gzip, chunked\r\n\r\n" +
+                "0\r\n\r\n";
+        DecoderEmbedder<Object> embedder = new DecoderEmbedder<Object>(new HttpResponseDecoder());
+        embedder.offer(ChannelBuffers.copiedBuffer(responseStr, CharsetUtil.US_ASCII));
+
+        Object msg = embedder.poll();
+        assertTrue(msg instanceof HttpResponse);
+        assertTrue(((HttpResponse) msg).isChunked());
+        assertTrue(embedder.poll() instanceof HttpChunkTrailer);
+        assertFalse(embedder.finish());
+    }
+
+    // Unlike requests, responses may be delimited by closing the connection, so a
+    // final transfer coding other than 'chunked' is not rejected for them.
+    @Test
+    public void testResponseTransferEncodingWithoutChunked() {
+        String responseStr = "HTTP/1.1 200 OK\r\n" +
+                "Connection: close\r\n" +
+                "Transfer-Encoding: gzip\r\n\r\n" +
+                "hello";
+        DecoderEmbedder<Object> embedder = new DecoderEmbedder<Object>(new HttpResponseDecoder());
+        embedder.offer(ChannelBuffers.copiedBuffer(responseStr, CharsetUtil.US_ASCII));
+
+        Object msg = embedder.poll();
+        assertTrue(msg instanceof HttpResponse);
+        HttpResponse response = (HttpResponse) msg;
+        assertEquals("gzip", response.getHeader(HttpHeaders.Names.TRANSFER_ENCODING));
+        assertFalse(response.containsHeader(HttpHeaders.Names.CONTENT_LENGTH));
+        Object chunk = embedder.poll();
+        assertTrue(chunk instanceof HttpChunk);
+        assertEquals("hello", ((HttpChunk) chunk).getContent().toString(CharsetUtil.US_ASCII));
+        embedder.finish();
+    }
+
+    // ---------------------------------------------------------------------
+    // CVE-2026-42581 (GHSA-xxqh-mfjm-7mv9): RFC 9112 does not allow the
+    // Transfer-Encoding header in messages older than HTTP/1.1, and an
+    // HTTP/1.1 message carrying both Transfer-Encoding and Content-Length is
+    // rejected instead of having its Content-Length silently removed, so that
+    // Netty and a front-end proxy cannot disagree on where a message ends.
+    // See https://www.rfc-editor.org/rfc/rfc9112.html#section-6.1
+    // Backport of netty/netty@84530fa.
+    // ---------------------------------------------------------------------
+
+    @Test
+    public void testContentLengthHeaderAndChunkedHttp11Smuggling() {
+        // A front-end framing by the Content-Length sees one request, while the chunked framing ends right
+        // before the smuggled one.
+        String body = "0\r\n\r\n" +
+                "GET /smuggled HTTP/1.1\r\n" +
+                "Host: example.com\r\n\r\n";
+        String requestStr = "POST / HTTP/1.1\r\n" +
+                "Host: example.com\r\n" +
+                "Content-Length: " + body.length() + "\r\n" +
+                "Transfer-Encoding: chunked\r\n\r\n" +
+                body;
+        assertContentLengthNotAllowed(new HttpRequestDecoder(), requestStr);
+    }
+
+    @Test
+    public void testContentLengthHeaderAndChunkedHttp10() {
+        String requestStr = "POST / HTTP/1.0\r\n" +
+                "Host: example.com\r\n" +
+                "Connection: close\r\n" +
+                "Content-Length: 5\r\n" +
+                "Transfer-Encoding: chunked\r\n\r\n" +
+                "0\r\n\r\n";
+        assertTransferEncodingNotAllowed(new HttpRequestDecoder(), requestStr);
+    }
+
+    @Test
+    public void testContentLengthHeaderAndChunkedHttp10Response() {
+        String responseStr = "HTTP/1.0 200 OK\r\n" +
+                "Content-Length: 5\r\n" +
+                "Transfer-Encoding: chunked\r\n\r\n" +
+                "0\r\n\r\n";
+        assertTransferEncodingNotAllowed(new HttpResponseDecoder(), responseStr);
+    }
+
+    @Test
+    public void testContentLengthHeaderAndChunkedHttp10Smuggling() {
+        // Content-Length says there is no body, while the chunked body carries a second request.
+        String smuggled = "GET /smuggled HTTP/1.0\r\n" +
+                "Host: example.com\r\n\r\n";
+        String requestStr = "POST / HTTP/1.0\r\n" +
+                "Host: example.com\r\n" +
+                "Content-Length: 0\r\n" +
+                "Transfer-Encoding: chunked\r\n\r\n" +
+                Integer.toHexString(smuggled.length()) + "\r\n" +
+                smuggled + "\r\n" +
+                "0\r\n\r\n";
+        assertTransferEncodingNotAllowed(new HttpRequestDecoder(), requestStr);
+    }
+
+    @Test
+    public void testTransferEncodingAndContentLengthHttp10DoesNotAllowRequestSmuggling() {
+        // Content-Length says there is no body, while the chunked body carries "GPOST".
+        String requestStr = "POST /api HTTP/1.0\r\n" +
+                "Host: localhost\r\n" +
+                "Transfer-Encoding: chunked\r\n" +
+                "Content-Length: 0\r\n\r\n" +
+                "5\r\n" +
+                "GPOST\r\n" +
+                "0\r\n\r\n";
+        assertTransferEncodingNotAllowed(new HttpRequestDecoder(), requestStr);
+    }
+
+    @Test
+    public void testTransferEncodingHttp10() {
+        String requestStr = "POST / HTTP/1.0\r\n" +
+                "Host: example.com\r\n" +
+                "Transfer-Encoding: chunked\r\n\r\n" +
+                "0\r\n\r\n";
+        assertTransferEncodingNotAllowed(new HttpRequestDecoder(), requestStr);
+    }
+
+    @Test
+    public void testTransferEncodingHttp10Response() {
+        String responseStr = "HTTP/1.0 200 OK\r\n" +
+                "Transfer-Encoding: chunked\r\n\r\n" +
+                "0\r\n\r\n";
+        assertTransferEncodingNotAllowed(new HttpResponseDecoder(), responseStr);
+    }
+
+    @Test
+    public void testTransferEncodingWithoutChunkedHttp10Response() {
+        String responseStr = "HTTP/1.0 200 OK\r\n" +
+                "Transfer-Encoding: gzip\r\n\r\n" +
+                "hello";
+        assertTransferEncodingNotAllowed(new HttpResponseDecoder(), responseStr);
+    }
+
+    @Test
+    public void testTransferEncodingHttp09() {
+        String requestStr = "POST / HTTP/0.9\r\n" +
+                "Host: example.com\r\n" +
+                "Transfer-Encoding: chunked\r\n\r\n" +
+                "0\r\n\r\n";
+        assertTransferEncodingNotAllowed(new HttpRequestDecoder(), requestStr);
+    }
+
+    @Test
+    public void testChunkedHttp11WithoutContentLength() {
+        String requestStr = "POST / HTTP/1.1\r\n" +
+                "Host: example.com\r\n" +
+                "Transfer-Encoding: chunked\r\n\r\n" +
+                "1\r\n" +
+                "a\r\n" +
+                "0\r\n\r\n";
+        DecoderEmbedder<Object> embedder = new DecoderEmbedder<Object>(new HttpRequestDecoder());
+        embedder.offer(ChannelBuffers.copiedBuffer(requestStr, CharsetUtil.US_ASCII));
+        HttpRequest request = (HttpRequest) embedder.poll();
+        assertTrue(request.isChunked());
+        assertEquals(HttpHeaders.Values.CHUNKED, request.getHeader(HttpHeaders.Names.TRANSFER_ENCODING));
+        HttpChunk chunk = (HttpChunk) embedder.poll();
+        assertEquals("a", chunk.getContent().toString(CharsetUtil.US_ASCII));
+        assertTrue(embedder.poll() instanceof HttpChunkTrailer);
+        assertNull(embedder.poll());
+        assertFalse(embedder.finish());
+    }
+
+    @Test
+    public void testChunkedHttp11WithoutContentLengthResponse() {
+        String responseStr = "HTTP/1.1 200 OK\r\n" +
+                "Transfer-Encoding: chunked\r\n\r\n" +
+                "1\r\n" +
+                "a\r\n" +
+                "0\r\n\r\n";
+        DecoderEmbedder<Object> embedder = new DecoderEmbedder<Object>(new HttpResponseDecoder());
+        embedder.offer(ChannelBuffers.copiedBuffer(responseStr, CharsetUtil.US_ASCII));
+        HttpResponse response = (HttpResponse) embedder.poll();
+        assertTrue(response.isChunked());
+        HttpChunk chunk = (HttpChunk) embedder.poll();
+        assertEquals("a", chunk.getContent().toString(CharsetUtil.US_ASCII));
+        assertTrue(embedder.poll() instanceof HttpChunkTrailer);
+        assertNull(embedder.poll());
+        assertFalse(embedder.finish());
+    }
+
+    @Test
+    public void testContentLengthHeaderAndChunkedHttp11Rfc7230Override() {
+        // The RFC 7230 behaviour can still be restored by overriding handleTransferEncodingChunkedWithContentLength.
+        String requestStr = "POST / HTTP/1.1\r\n" +
+                "Host: example.com\r\n" +
+                "Content-Length: 5\r\n" +
+                "Transfer-Encoding: chunked\r\n\r\n" +
+                "0\r\n\r\n";
+        DecoderEmbedder<Object> embedder = new DecoderEmbedder<Object>(newRfc7230RequestDecoder());
+        embedder.offer(ChannelBuffers.copiedBuffer(requestStr, CharsetUtil.US_ASCII));
+        HttpRequest request = (HttpRequest) embedder.poll();
+        assertTrue(request.isChunked());
+        assertEquals(HttpHeaders.Values.CHUNKED, request.getHeader(HttpHeaders.Names.TRANSFER_ENCODING));
+        assertFalse(request.containsHeader(HttpHeaders.Names.CONTENT_LENGTH));
+        assertTrue(embedder.poll() instanceof HttpChunkTrailer);
+        assertFalse(embedder.finish());
+    }
+
+    @Test
+    public void testContentLengthHeaderAndChunkedHttp10Rfc7230Override() {
+        // Overriding handleTransferEncodingChunkedWithContentLength never makes Transfer-Encoding legal before HTTP/1.1.
+        String requestStr = "POST / HTTP/1.0\r\n" +
+                "Host: example.com\r\n" +
+                "Content-Length: 5\r\n" +
+                "Transfer-Encoding: chunked\r\n\r\n" +
+                "0\r\n\r\n";
+        assertTransferEncodingNotAllowed(newRfc7230RequestDecoder(), requestStr);
+    }
+
+    private static HttpRequestDecoder newRfc7230RequestDecoder() {
+        return new HttpRequestDecoder() {
+            @Override
+            protected void handleTransferEncodingChunkedWithContentLength(HttpMessage message) {
+                message.removeHeader(HttpHeaders.Names.CONTENT_LENGTH);
+            }
+        };
+    }
+
+    private static void assertTransferEncodingNotAllowed(HttpMessageDecoder decoder, String messageStr) {
+        assertMessageRejected(decoder, messageStr,
+                "The Transfer-Encoding header is only allowed in HTTP/1.1 or newer");
+    }
+
+    private static void assertContentLengthNotAllowed(HttpMessageDecoder decoder, String messageStr) {
+        assertMessageRejected(decoder, messageStr,
+                "Content-Length are not allowed in HTTP/1.1 messages that contains a Transfer-Encoding header.");
+    }
+
+    private static void assertMessageRejected(HttpMessageDecoder decoder, String messageStr, String expectedMessage) {
+        DecoderEmbedder<Object> embedder = new DecoderEmbedder<Object>(decoder);
+        try {
+            embedder.offer(ChannelBuffers.copiedBuffer(messageStr, CharsetUtil.US_ASCII));
+            fail("Expected CodecEmbedderException");
+        } catch (CodecEmbedderException e) {
+            assertTrue(e.getCause() instanceof IllegalArgumentException);
+            assertEquals(expectedMessage, e.getCause().getMessage());
+        }
+        // Neither the rejected message nor anything after it (e.g. a smuggled message) was decoded.
         assertNull(embedder.poll());
     }
 
