@@ -41,4 +41,112 @@ public class HttpMessageDecoderTest {
             assertTrue(e.getCause() instanceof IllegalArgumentException);
         }
     }
+
+    @Test
+    public void testMultipleContentLengthHeaders() {
+        String requestStr = "GET /some/path HTTP/1.1\r\n" +
+                "Content-Length: 1\r\n" +
+                "Content-Length: 0\r\n\r\n" +
+                "b";
+        testInvalidHeaders0(requestStr);
+    }
+
+    @Test
+    public void testMultipleContentLengthHeaders2() {
+        String requestStr = "GET /some/path HTTP/1.1\r\n" +
+                "Content-Length: 1\r\n" +
+                "Connection: close\r\n" +
+                "Content-Length: 0\r\n\r\n" +
+                "b";
+        testInvalidHeaders0(requestStr);
+    }
+
+    @Test
+    public void testMultipleContentLengthHeadersResponse() {
+        String responseStr = "HTTP/1.1 200 OK\r\n" +
+                "Content-Length: 1\r\n" +
+                "Content-Length: 0\r\n\r\n" +
+                "b";
+        DecoderEmbedder<Object> embedder = new DecoderEmbedder<Object>(new HttpResponseDecoder());
+        try {
+            embedder.offer(ChannelBuffers.copiedBuffer(responseStr, CharsetUtil.US_ASCII));
+            fail("Expected CodecEmbedderException");
+        } catch (CodecEmbedderException e) {
+            assertTrue(e.getCause() instanceof IllegalArgumentException);
+        }
+    }
+
+    @Test
+    public void testContentLengthHeaderWithCommaValue() {
+        String requestStr = "GET /some/path HTTP/1.1\r\n" +
+                "Content-Length: 1,1\r\n\r\n" +
+                "b";
+        testInvalidHeaders0(requestStr);
+    }
+
+    @Test
+    public void testContentLengthHeaderWithCommaValueAndChunked() {
+        String requestStr = "POST / HTTP/1.1\r\n" +
+                "Host: example.com\r\n" +
+                "Content-Length: 5, 5\r\n" +
+                "Transfer-Encoding: chunked\r\n\r\n" +
+                "0\r\n\r\n";
+        testInvalidHeaders0(requestStr);
+    }
+
+    @Test
+    public void testMultipleContentLengthHeadersWithFolding() {
+        String requestStr = "POST / HTTP/1.1\r\n" +
+                "Host: example.com\r\n" +
+                "Connection: close\r\n" +
+                "Content-Length: 5\r\n" +
+                "Content-Length:\r\n" +
+                "\t6\r\n\r\n" +
+                "123456";
+        testInvalidHeaders0(requestStr);
+    }
+
+    @Test
+    public void testContentLengthAndTransferEncodingChunked() {
+        String requestStr = "POST / HTTP/1.1\r\n" +
+                "Host: example.com\r\n" +
+                "Connection: close\r\n" +
+                "Content-Length: 5\r\n" +
+                "Transfer-Encoding: chunked\r\n\r\n" +
+                "0\r\n\r\n";
+        DecoderEmbedder<Object> embedder = new DecoderEmbedder<Object>(new HttpRequestDecoder());
+        embedder.offer(ChannelBuffers.copiedBuffer(requestStr, CharsetUtil.US_ASCII));
+        HttpRequest request = (HttpRequest) embedder.poll();
+        assertTrue(request.isChunked());
+        assertEquals(HttpHeaders.Values.CHUNKED, request.getHeader(HttpHeaders.Names.TRANSFER_ENCODING));
+        assertFalse(request.containsHeader(HttpHeaders.Names.CONTENT_LENGTH));
+        assertTrue(embedder.poll() instanceof HttpChunkTrailer);
+        assertFalse(embedder.finish());
+    }
+
+    @Test
+    public void testContentLengthAndTransferEncodingChunkedResponse() {
+        String responseStr = "HTTP/1.1 200 OK\r\n" +
+                "Content-Length: 5\r\n" +
+                "Transfer-Encoding: chunked\r\n\r\n" +
+                "0\r\n\r\n";
+        DecoderEmbedder<Object> embedder = new DecoderEmbedder<Object>(new HttpResponseDecoder());
+        embedder.offer(ChannelBuffers.copiedBuffer(responseStr, CharsetUtil.US_ASCII));
+        HttpResponse response = (HttpResponse) embedder.poll();
+        assertTrue(response.isChunked());
+        assertEquals(HttpHeaders.Values.CHUNKED, response.getHeader(HttpHeaders.Names.TRANSFER_ENCODING));
+        assertFalse(response.containsHeader(HttpHeaders.Names.CONTENT_LENGTH));
+        assertTrue(embedder.poll() instanceof HttpChunkTrailer);
+        assertFalse(embedder.finish());
+    }
+
+    private static void testInvalidHeaders0(String requestStr) {
+        DecoderEmbedder<Object> embedder = new DecoderEmbedder<Object>(new HttpRequestDecoder());
+        try {
+            embedder.offer(ChannelBuffers.copiedBuffer(requestStr, CharsetUtil.US_ASCII));
+            fail("Expected CodecEmbedderException");
+        } catch (CodecEmbedderException e) {
+            assertTrue(e.getCause() instanceof IllegalArgumentException);
+        }
+    }
 }
