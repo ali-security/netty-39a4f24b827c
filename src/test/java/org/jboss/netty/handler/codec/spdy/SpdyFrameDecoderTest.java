@@ -17,6 +17,8 @@ package org.jboss.netty.handler.codec.spdy;
 
 import org.jboss.netty.bootstrap.ClientBootstrap;
 import org.jboss.netty.bootstrap.ServerBootstrap;
+import org.jboss.netty.buffer.ChannelBuffer;
+import org.jboss.netty.buffer.ChannelBuffers;
 import org.jboss.netty.channel.Channel;
 import org.jboss.netty.channel.ChannelFactory;
 import org.jboss.netty.channel.ChannelFuture;
@@ -26,6 +28,8 @@ import org.jboss.netty.channel.MessageEvent;
 import org.jboss.netty.channel.SimpleChannelUpstreamHandler;
 import org.jboss.netty.channel.socket.nio.NioClientSocketChannelFactory;
 import org.jboss.netty.channel.socket.nio.NioServerSocketChannelFactory;
+import org.jboss.netty.handler.codec.embedder.CodecEmbedderException;
+import org.jboss.netty.handler.codec.embedder.DecoderEmbedder;
 import org.jboss.netty.util.TestUtil;
 import org.junit.Test;
 
@@ -87,6 +91,33 @@ public class SpdyFrameDecoderTest {
                 sb.releaseExternalResources();
             }
         }
+    }
+
+    @Test
+    public void testSpdySettingsFrameContainTooManySettings() {
+        int numSettings = SpdyFrameDecoder.DEFAULT_MAX_NUM_SETTINGS * 2;
+        int length = 8 * numSettings + 4;
+
+        ChannelBuffer buf = ChannelBuffers.buffer(SPDY_HEADER_SIZE + length);
+        buf.writeShort(0x8000 | SPDY_MAX_VERSION);
+        buf.writeShort(SPDY_SETTINGS_FRAME);
+        buf.writeByte(0);
+        buf.writeMedium(length);
+        buf.writeInt(numSettings);
+        for (int i = 0; i < numSettings; i++) {
+            buf.writeByte(0);
+            buf.writeMedium(i + 1);
+            buf.writeInt(i);
+        }
+
+        DecoderEmbedder<Object> decoder = new DecoderEmbedder<Object>(new SpdyFrameDecoder(SPDY_MAX_VERSION));
+        try {
+            decoder.offer(buf);
+            fail();
+        } catch (CodecEmbedderException e) {
+            assertTrue(e.getCause() instanceof SpdyProtocolException);
+        }
+        assertNull(decoder.poll());
     }
 
     private static void sendAndWaitForFrame(Channel cc, SpdyFrame frame, CaptureHandler handler) {

@@ -31,8 +31,11 @@ public class SpdyFrameDecoder extends FrameDecoder {
     private static final SpdyProtocolException INVALID_FRAME =
             new SpdyProtocolException("Received invalid frame");
 
+    static final int DEFAULT_MAX_NUM_SETTINGS = 64;
+
     private final int spdyVersion;
     private final int maxChunkSize;
+    private final int maxNumSettings;
 
     private final SpdyHeaderBlockDecoder headerBlockDecoder;
 
@@ -70,11 +73,20 @@ public class SpdyFrameDecoder extends FrameDecoder {
      * Creates a new instance with the specified parameters.
      */
     public SpdyFrameDecoder(int version, int maxChunkSize, int maxHeaderSize) {
-        this(version, maxChunkSize, SpdyHeaderBlockDecoder.newInstance(version, maxHeaderSize));
+        this(version, maxChunkSize, maxHeaderSize, DEFAULT_MAX_NUM_SETTINGS);
+    }
+
+    public SpdyFrameDecoder(int version, int maxChunkSize, int maxHeaderSize, int maxNumSettings) {
+        this(version, maxChunkSize, SpdyHeaderBlockDecoder.newInstance(version, maxHeaderSize), maxNumSettings);
     }
 
     protected SpdyFrameDecoder(
             int version, int maxChunkSize, SpdyHeaderBlockDecoder headerBlockDecoder) {
+        this(version, maxChunkSize, headerBlockDecoder, DEFAULT_MAX_NUM_SETTINGS);
+    }
+
+    private SpdyFrameDecoder(
+            int version, int maxChunkSize, SpdyHeaderBlockDecoder headerBlockDecoder, int maxNumSettings) {
         super(false);
         if (version < SPDY_MIN_VERSION || version > SPDY_MAX_VERSION) {
             throw new IllegalArgumentException(
@@ -84,8 +96,13 @@ public class SpdyFrameDecoder extends FrameDecoder {
             throw new IllegalArgumentException(
                     "maxChunkSize must be a positive integer: " + maxChunkSize);
         }
+        if (maxNumSettings <= 0) {
+            throw new IllegalArgumentException(
+                    "maxNumSettings must be a positive integer: " + maxNumSettings);
+        }
         spdyVersion = version;
         this.maxChunkSize = maxChunkSize;
+        this.maxNumSettings = maxNumSettings;
         this.headerBlockDecoder = headerBlockDecoder;
         state = State.READ_COMMON_HEADER;
     }
@@ -158,6 +175,12 @@ public class SpdyFrameDecoder extends FrameDecoder {
                 if ((length & 0x07) != 0 || length >> 3 != numEntries) {
                     state = State.FRAME_ERROR;
                     fireInvalidFrameException(ctx);
+                    return null;
+                }
+                if (numEntries > maxNumSettings) {
+                    state = State.FRAME_ERROR;
+                    fireProtocolException(ctx, "Invalid SETTINGS Frame (allowed number of settings exceeded: "
+                            + numEntries + " > " + maxNumSettings + ')');
                     return null;
                 }
 
