@@ -124,6 +124,7 @@ public class WebSocketRequestBuilder {
                 .uri("/test")
                 .host("server.example.com")
                 .upgrade(WEBSOCKET.toLowerCase())
+                .connection("Upgrade")
                 .key("dGhlIHNhbXBsZSBub25jZQ==")
                 .origin("http://example.com")
                 .version13()

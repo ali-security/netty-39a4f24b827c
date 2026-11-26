@@ -22,6 +22,7 @@ import org.jboss.netty.channel.SimpleChannelHandler;
 import org.jboss.netty.handler.codec.embedder.CodecEmbedderException;
 import org.jboss.netty.handler.codec.embedder.DecoderEmbedder;
 import org.jboss.netty.handler.codec.http.DefaultHttpRequest;
+import org.jboss.netty.handler.codec.http.HttpHeaders.Names;
 import org.jboss.netty.handler.codec.http.HttpMethod;
 import org.jboss.netty.handler.codec.http.HttpRequest;
 import org.jboss.netty.handler.codec.http.HttpRequestDecoder;
@@ -107,6 +108,55 @@ public class WebSocketServerProtocolHandlerTest {
         }
     }
     
+    @Test
+    public void testHttpUpgradeRequestWithoutConnectionUpgradeRejected() {
+        for (String version : new String[] { "7", "8", "13" }) {
+            assertHandshakeRejected(newUpgradeRequest(version, null, WEBSOCKET.toLowerCase()),
+                    "not a WebSocket request: a |Connection| header must include a token 'Upgrade'");
+            assertHandshakeRejected(newUpgradeRequest(version, "close", WEBSOCKET.toLowerCase()),
+                    "not a WebSocket request: a |Connection| header must include a token 'Upgrade'");
+            assertHandshakeRejected(newUpgradeRequest(version, "Upgrade", null),
+                    "not a WebSocket request: an |Upgrade| header must containing the value 'websocket'");
+            assertHandshakeRejected(newUpgradeRequest(version, "Upgrade", "my_websocket"),
+                    "not a WebSocket request: an |Upgrade| header must containing the value 'websocket'");
+        }
+    }
+
+    @Test
+    public void testHttpUpgradeRequestWithConnectionTokenList() {
+        for (String version : new String[] { "7", "8", "13" }) {
+            DecoderEmbedder<Object> embedder = decoderEmbedder();
+            HttpResponseInterceptor responseInterceptor = addHttpResponseInterceptor(embedder);
+
+            embedder.offer(newUpgradeRequest(version, "keep-alive, Upgrade", WEBSOCKET.toLowerCase()));
+
+            assertEquals(SWITCHING_PROTOCOLS, responseInterceptor.getHttpResponse().getStatus());
+        }
+    }
+
+    private static HttpRequest newUpgradeRequest(String version, String connection, String upgrade) {
+        HttpRequest req = new WebSocketRequestBuilder().httpVersion(HTTP_1_1)
+                .method(HttpMethod.GET)
+                .uri("/test")
+                .host("server.example.com")
+                .connection(connection)
+                .upgrade(upgrade)
+                .key("dGhlIHNhbXBsZSBub25jZQ==")
+                .build();
+        req.setHeader(Names.SEC_WEBSOCKET_VERSION, version);
+        return req;
+    }
+
+    private static void assertHandshakeRejected(HttpRequest req, String message) {
+        try {
+            decoderEmbedder().offer(req);
+            fail();
+        } catch (CodecEmbedderException e) {
+            assertTrue(e.getCause() instanceof WebSocketHandshakeException);
+            assertEquals(message, e.getCause().getMessage());
+        }
+    }
+
     private static void assertWebSocketHandshakeException(Exception e) {
         assertTrue(e instanceof CodecEmbedderException);
         assertTrue(e.getCause() instanceof WebSocketHandshakeException);

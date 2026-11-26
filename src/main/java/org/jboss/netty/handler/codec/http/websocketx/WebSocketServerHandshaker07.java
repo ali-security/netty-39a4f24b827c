@@ -117,6 +117,14 @@ public class WebSocketServerHandshaker07 extends WebSocketServerHandshaker {
         }
         HttpResponse res = new DefaultHttpResponse(HTTP_1_1, HttpResponseStatus.SWITCHING_PROTOCOLS);
 
+        if (!WebSocketUtil.containsHeaderToken(req, Names.CONNECTION, UPGRADE)) {
+            throw new WebSocketHandshakeException(
+                    "not a WebSocket request: a |Connection| header must include a token 'Upgrade'");
+        }
+        if (!WEBSOCKET.equalsIgnoreCase(req.getHeader(Names.UPGRADE))) {
+            throw new WebSocketHandshakeException(
+                    "not a WebSocket request: an |Upgrade| header must containing the value 'websocket'");
+        }
         String key = req.getHeader(Names.SEC_WEBSOCKET_KEY);
         if (key == null) {
             throw new WebSocketHandshakeException("not a WebSocket request: missing key");

@@ -21,6 +21,7 @@ import java.security.NoSuchAlgorithmException;
 import org.jboss.netty.buffer.ChannelBuffer;
 import org.jboss.netty.buffer.ChannelBuffers;
 import org.jboss.netty.handler.codec.base64.Base64;
+import org.jboss.netty.handler.codec.http.HttpRequest;
 import org.jboss.netty.util.CharsetUtil;
 
 /**
@@ -144,6 +145,17 @@ final class WebSocketUtil {
      */
     static int randomNumber(int min, int max) {
         return (int) (Math.random() * max + min);
+    }
+
+    static boolean containsHeaderToken(HttpRequest req, String name, String token) {
+        for (String value : req.getHeaders(name)) {
+            for (String element : value.split(",")) {
+                if (element.trim().equalsIgnoreCase(token)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private WebSocketUtil() {
