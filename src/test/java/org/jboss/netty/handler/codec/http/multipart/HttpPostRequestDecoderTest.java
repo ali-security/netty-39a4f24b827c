@@ -213,4 +213,24 @@ public class HttpPostRequestDecoderTest {
                 data.getBytes(), upload.get());
         }
     }
+
+    @Test
+    public void testDecodeMustCleanFilenameCharacters() throws Exception {
+        final String boundary = "861fbeab-cd20-470c-9609-d40a0f704466";
+        final String body =
+                "--" + boundary + "\r\n" +
+                "Content-Disposition: form-data; name=\"file\"; filename=\" dir\\file\u0000\u007F\u00F7.txt \"\r\n" +
+                "Content-Type: text/plain\r\n" +
+                "\r\n" +
+                "x\r\n" +
+                "--" + boundary + "--\r\n";
+
+        final DefaultHttpRequest req = new DefaultHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.POST, "/upload");
+        req.setHeader(HttpHeaders.Names.CONTENT_TYPE, "multipart/form-data; boundary=" + boundary);
+        req.setContent(ChannelBuffers.copiedBuffer(body, CharsetUtil.UTF_8));
+
+        final HttpPostRequestDecoder decoder = new HttpPostRequestDecoder(new DefaultHttpDataFactory(false), req);
+        FileUpload upload = (FileUpload) decoder.getBodyHttpData("file");
+        assertEquals("dirfile  \u00F7.txt", upload.getFilename());
+    }
 }

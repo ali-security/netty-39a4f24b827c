@@ -49,10 +49,7 @@ public class MemoryFileUpload extends AbstractMemoryHttpData implements FileUplo
     }
 
     public void setFilename(String filename) {
-        if (filename == null) {
-            throw new NullPointerException("filename");
-        }
-        this.filename = filename;
+        this.filename = HttpPostBodyUtil.validateFileNameForMultiPart(filename);
     }
 
     @Override

@@ -17,6 +17,7 @@ package org.jboss.netty.handler.codec.http.multipart;
 
 import org.jboss.netty.buffer.ChannelBuffers;
 import org.jboss.netty.handler.codec.http.DefaultHttpRequest;
+import org.jboss.netty.handler.codec.http.HttpConstants;
 import org.jboss.netty.handler.codec.http.HttpHeaders;
 import org.jboss.netty.handler.codec.http.HttpMethod;
 import org.jboss.netty.handler.codec.http.HttpVersion;
@@ -144,6 +145,36 @@ public class DiskFileUploadTest {
             assertOwnerOnly(upload.getFile());
         } finally {
             decoder.cleanFiles();
+        }
+    }
+
+    @Test
+    public void testFilenameCannotContainIllegalCharacters() {
+        byte[] illegalChars = {
+                0x00,
+                HttpConstants.CR,
+                HttpConstants.LF,
+                0x19,
+                HttpConstants.DEL,
+                HttpConstants.DOUBLE_QUOTE,
+                HttpConstants.BACKSLASH
+        };
+        for (byte illegal : illegalChars) {
+            for (String filename : new String[] { (char) illegal + "f", "f" + (char) illegal + 'f',
+                    "f" + (char) illegal }) {
+                try {
+                    new DiskFileUpload("f", filename, "plain/text", null, null, 0);
+                    fail(filename);
+                } catch (IllegalArgumentException e) {
+                    assertTrue(e.getMessage().contains("Illegal filename character"));
+                }
+                try {
+                    new MemoryFileUpload("f", filename, "plain/text", null, null, 0);
+                    fail(filename);
+                } catch (IllegalArgumentException e) {
+                    assertTrue(e.getMessage().contains("Illegal filename character"));
+                }
+            }
         }
     }
 }

@@ -1985,8 +1985,10 @@ public class HttpPostRequestDecoder {
                 sb.append(HttpConstants.SP);
             } else if (nextChar == HttpConstants.HT) {
                 sb.append(HttpConstants.SP);
-            } else if (nextChar == HttpConstants.DOUBLE_QUOTE) {
+            } else if (nextChar == HttpConstants.DOUBLE_QUOTE || nextChar == HttpConstants.BACKSLASH) {
                 // nothing added, just removes it
+            } else if (nextChar < HttpConstants.SP || nextChar == HttpConstants.DEL) {
+                sb.append((char) HttpConstants.SP);
             } else {
                 sb.append(nextChar);
             }

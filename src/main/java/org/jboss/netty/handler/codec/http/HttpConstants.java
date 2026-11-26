@@ -66,6 +66,10 @@ public final class HttpConstants {
      */
     public static final byte DOUBLE_QUOTE = '"';
 
+    public static final byte BACKSLASH = '\\';
+
+    public static final byte DEL = 0x7F;
+
     /**
      * Default character set (UTF-8)
      */

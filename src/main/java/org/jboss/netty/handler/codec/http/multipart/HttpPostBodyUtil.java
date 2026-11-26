@@ -16,6 +16,7 @@
 package org.jboss.netty.handler.codec.http.multipart;
 
 import org.jboss.netty.buffer.ChannelBuffer;
+import org.jboss.netty.handler.codec.http.HttpConstants;
 import org.jboss.netty.util.CharsetUtil;
 
 import java.nio.charset.Charset;
@@ -218,6 +219,22 @@ final class HttpPostBodyUtil {
             }
         }
         return result;
+    }
+
+    static String validateFileNameForMultiPart(String filename) {
+        if (filename == null) {
+            throw new NullPointerException("filename");
+        }
+        int length = filename.length();
+        for (int i = 0; i < length; i++) {
+            char c = filename.charAt(i);
+            if (c < HttpConstants.SP || c == HttpConstants.DEL ||
+                    c == HttpConstants.DOUBLE_QUOTE || c == HttpConstants.BACKSLASH) {
+                throw new IllegalArgumentException(
+                        String.format("Illegal filename character 0x%02x at index %d", (int) c, i));
+            }
+        }
+        return filename;
     }
 
 }
