@@ -533,9 +533,13 @@ public abstract class HttpMessageDecoder extends ReplayingDecoder<HttpMessageDec
     private void skipControlCharacters(ChannelBuffer buffer) throws TooLongFrameException {
         for (;;) {
             char c = (char) buffer.readUnsignedByte();
-            if (!Character.isISOControl(c) &&
-                !Character.isWhitespace(c)) {
+            if (c != HttpConstants.CR && c != HttpConstants.LF) {
                 buffer.readerIndex(buffer.readerIndex() - 1);
+                if (Character.isISOControl(c)) {
+                    throw new IllegalArgumentException(
+                            "Only CR LF octets may precede the initial line, but received 0x" +
+                            Integer.toHexString(c));
+                }
                 break;
             }
             // Count the skipped char against the initial line budget so that an

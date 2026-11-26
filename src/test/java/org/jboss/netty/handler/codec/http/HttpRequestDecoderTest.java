@@ -24,7 +24,9 @@ import org.jboss.netty.util.CharsetUtil;
 import org.junit.Test;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -79,5 +81,41 @@ public class HttpRequestDecoderTest {
         assertEquals(HttpMethod.GET, req.getMethod());
         assertEquals("/some/path", req.getUri());
         assertEquals(HttpVersion.HTTP_1_1, req.getProtocolVersion());
+    }
+
+    @Test
+    public void testNonCrlfControlBytesPrecedingRequestLineAreRejected() {
+        DecoderEmbedder<Object> embedder = new DecoderEmbedder<Object>(new HttpRequestDecoder());
+        assertInitialLineRejected(embedder, "\u0000\u0001GET / HTTP/1.1\r\nHost: example.com\r\n\r\n");
+        assertNull(embedder.poll());
+    }
+
+    @Test
+    public void testNonCrlfControlBytesAfterEmptyLinesPrecedingRequestLineAreRejected() {
+        DecoderEmbedder<Object> embedder = new DecoderEmbedder<Object>(new HttpRequestDecoder());
+        assertFalse(embedder.offer(ChannelBuffers.copiedBuffer("\r\n\r\n", CharsetUtil.US_ASCII)));
+        assertInitialLineRejected(embedder, "\tGET / HTTP/1.1\r\nHost: example.com\r\n\r\n");
+        assertNull(embedder.poll());
+    }
+
+    @Test
+    public void testNonCrlfControlBytesPrecedingPipelinedRequestLineAreRejected() {
+        DecoderEmbedder<Object> embedder = new DecoderEmbedder<Object>(new HttpRequestDecoder());
+        assertInitialLineRejected(embedder, "GET /first HTTP/1.1\r\n" +
+                "Host: example.com\r\n\r\n" +
+                (char) 0x0b + "GET /second HTTP/1.1\r\n" +
+                "Host: example.com\r\n\r\n");
+        HttpRequest first = (HttpRequest) embedder.poll();
+        assertEquals("/first", first.getUri());
+        assertNull(embedder.poll());
+    }
+
+    private static void assertInitialLineRejected(DecoderEmbedder<Object> embedder, String requestStr) {
+        try {
+            embedder.offer(ChannelBuffers.copiedBuffer(requestStr, CharsetUtil.US_ASCII));
+            fail("Expected CodecEmbedderException");
+        } catch (CodecEmbedderException e) {
+            assertTrue(String.valueOf(e.getCause()), e.getCause() instanceof IllegalArgumentException);
+        }
     }
 }
