@@ -25,15 +25,20 @@ import org.jboss.netty.buffer.ChannelBuffers;
 
 class SpdyHeaderBlockZlibDecoder extends SpdyHeaderBlockRawDecoder {
 
+    static final int MAX_DECOMPRESSED_SIZE_MULTIPLIER = 16;
+
     private final int version;
     private final byte[] out = new byte[8192];
     private final Inflater decompressor = new Inflater();
+    private final long maxDecompressedSize;
 
     private ChannelBuffer decompressed;
+    private long totalInflated;
 
     public SpdyHeaderBlockZlibDecoder(int version, int maxHeaderSize) {
         super(version, maxHeaderSize);
         this.version = version;
+        maxDecompressedSize = (long) maxHeaderSize * MAX_DECOMPRESSED_SIZE_MULTIPLIER;
     }
 
     @Override
@@ -43,6 +48,11 @@ class SpdyHeaderBlockZlibDecoder extends SpdyHeaderBlockRawDecoder {
         int numBytes;
         do {
             numBytes = decompress(frame);
+            totalInflated += numBytes;
+            if (totalInflated > maxDecompressedSize) {
+                throw new SpdyProtocolException(
+                        "Decompressed header block exceeds " + maxDecompressedSize + " bytes");
+            }
         } while (!decompressed.readable() && numBytes > 0);
     }
 
@@ -82,6 +92,7 @@ class SpdyHeaderBlockZlibDecoder extends SpdyHeaderBlockRawDecoder {
     @Override
     void reset() {
         decompressed = null;
+        totalInflated = 0;
         super.reset();
     }
 

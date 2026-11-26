@@ -120,6 +120,61 @@ public class SpdyFrameDecoderTest {
         assertNull(decoder.poll());
     }
 
+    @Test
+    public void testHeaderBlockAtDecompressionCapIsAccepted() {
+        decodeTruncatedHeaderBlock(0);
+    }
+
+    @Test
+    public void testHeaderBlockExceedingDecompressionCapIsRejected() {
+        try {
+            decodeTruncatedHeaderBlock(1);
+            fail();
+        } catch (CodecEmbedderException e) {
+            assertTrue(e.getCause() instanceof SpdyProtocolException);
+        }
+    }
+
+    private static void decodeTruncatedHeaderBlock(int bytesOverCap) {
+        int maxHeaderSize = 16;
+        ChannelBuffer nameLength = ChannelBuffers.buffer(8);
+        nameLength.writeInt(1);
+        nameLength.writeInt(maxHeaderSize + 1);
+        int skippedBytes = maxHeaderSize * SpdyHeaderBlockZlibDecoder.MAX_DECOMPRESSED_SIZE_MULTIPLIER
+                - nameLength.readableBytes() + bytesOverCap;
+        ChannelBuffer first = storedBlock(nameLength, false);
+        ChannelBuffer second = storedBlock(ChannelBuffers.wrappedBuffer(new byte[skippedBytes]), true);
+
+        ChannelBuffer header = ChannelBuffers.buffer(SPDY_HEADER_SIZE + 12);
+        header.writeShort(0x8000 | SPDY_MAX_VERSION);
+        header.writeShort(SPDY_SYN_STREAM_FRAME);
+        header.writeByte(0);
+        header.writeMedium(12 + first.readableBytes() + second.readableBytes());
+        header.writeInt(1);
+        header.writeInt(0);
+        header.writeShort(0);
+        header.writeByte(0x78);
+        header.writeByte(0x01);
+
+        DecoderEmbedder<Object> decoder = new DecoderEmbedder<Object>(
+                new SpdyFrameDecoder(SPDY_MAX_VERSION, 8192, maxHeaderSize));
+        decoder.offer(ChannelBuffers.wrappedBuffer(header, first));
+        assertTrue(((SpdyHeadersFrame) decoder.poll()).isTruncated());
+        decoder.offer(second);
+    }
+
+    private static ChannelBuffer storedBlock(ChannelBuffer data, boolean last) {
+        int length = data.readableBytes();
+        ChannelBuffer block = ChannelBuffers.buffer(5 + length);
+        block.writeByte(last ? 1 : 0);
+        block.writeByte(length);
+        block.writeByte(length >>> 8);
+        block.writeByte(~length);
+        block.writeByte(~length >>> 8);
+        block.writeBytes(data);
+        return block;
+    }
+
     private static void sendAndWaitForFrame(Channel cc, SpdyFrame frame, CaptureHandler handler) {
         cc.write(frame);
         long theFuture = System.currentTimeMillis() + 3000;
